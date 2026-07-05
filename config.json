@@ -1,0 +1,28 @@
+{
+    "save_dir": "./output",
+    "model_name": "minisnail",
+    "data_path": "./data/pretrain_t2t_mini.jsonl",
+    
+    "epochs": 2,
+    "batch_size": 32,
+    "learning_rate": 0.001,
+    "device": "cuda:0",
+    "dtype": "bfloat16",
+    "num_workers": 8,
+    "accumulation_steps": 8,
+    "grad_clip": 1.0,
+    "log_interval": 100,
+    "save_interval": 1000,
+
+    "tokenizer_path": "./model",
+    "vocab_size": 6400,
+
+    "d_model": 768,
+    "n_heads": 8,
+    "d_ff": 2048,
+    "max_seq_len": 340,
+    "use_moe": 0,
+
+    "use_wandb": 0,
+    "wandb_project": "minisnail"
+}
