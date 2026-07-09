@@ -1,0 +1,4 @@
+自然语言处理是人工智能皇冠上的明珠。
+Transformer 架构推动了大规模语言模型的爆发。
+数据预处理是训练 pipeline 中最容易被忽视却最关键的一环。
+PyTorch DataLoader 通过多进程预取大幅提升 GPU 利用率。

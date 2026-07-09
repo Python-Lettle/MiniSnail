@@ -11,7 +11,10 @@ class SnailConfig(PretrainedConfig):
         self.bos_token_id: int = kwargs.get("bos_token_id", 1)
         self.eos_token_id: int = kwargs.get("eos_token_id", 2)
         super().__init__(bos_token_id=self.bos_token_id, eos_token_id=self.eos_token_id, **kwargs)
-
+        
+        # Random configuration
+        self.seed: int = kwargs.get("seed", 42)
+        
         # Path configuration
         self.save_dir: str | os.PathLike | None = kwargs.get("save_dir", "./output")
         self.model_name: str | None = kwargs.get("model_name", None)
@@ -20,17 +23,20 @@ class SnailConfig(PretrainedConfig):
         # Training configuration
         self.epochs: int = kwargs.get("epochs", 2)
         self.batch_size: int = kwargs.get("batch_size", 32)
+        self.block_size: int = kwargs.get("block_size", 128)
         self.learning_rate: float = kwargs.get("learning_rate", 0.001)
-        self.device: str = torch.device(kwargs.get("device", "cuda:0"))
+        self.device: str = kwargs.get("device", "cuda:0")
         self.dtype: str = kwargs.get("dtype", "bfloat16")
         self.num_workers: int = kwargs.get("num_workers", 8)
         self.accumulation_steps: int = kwargs.get("accumulation_steps", 8)
         self.grad_clip: float = kwargs.get("grad_clip", 1.0)
         self.log_interval: int = kwargs.get("log_interval", 100)
         self.save_interval: int = kwargs.get("save_interval", 1000)
+        self.use_checkpoint: int = kwargs.get("use_checkpoint", 0)
+        self.checkpoint_path: str | None = kwargs.get("checkpoint_path", None)
         
         # Tokenizer configuration
-        self.tokenizer_path: str = kwargs.get("tokenizer_path", "./model")
+        self.tokenizer_path: str = kwargs.get("tokenizer_path", "./model/minimind")
         self.vocab_size: int = kwargs.get("vocab_size", 6400)
 
         # Model configuration
@@ -53,3 +59,7 @@ class SnailConfig(PretrainedConfig):
         self.use_wandb: int = kwargs.get("use_wandb", 0)             # Whether to use Wandb, 0 for no, 1 for yes
         self.wandb_project: str | None = kwargs.get("wandb_project", "minisnail")
         
+        # Generate configuration
+        self.max_generate_token: int = kwargs.get("max_generate_token", 340)
+        self.temperature: float = kwargs.get("temperature", 0.8)
+        self.top_k: int = kwargs.get("top_k", 50)
