@@ -14,5 +14,5 @@ if __name__ == '__main__':
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
 
-    raw_data = tokenizer.decode(train_data)
+    raw_data = tokenizer.decode(train_data[:100])
     console.print(raw_data)

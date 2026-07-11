@@ -1,65 +1,128 @@
+from dataclasses import dataclass, field
+from typing import Optional, List
+import json
 import os
-import math
-from transformers import PretrainedConfig
 
-class SnailConfig(PretrainedConfig):
-    model_type = "minisnail"
-    def __init__(self, **kwargs):
-        '''Initialize a new configuration.
-        '''
-        # Extract PretrainedConfig-specific keys before they're consumed by kwargs.get
-        self.bos_token_id: int = kwargs.get("bos_token_id", 1)
-        self.eos_token_id: int = kwargs.get("eos_token_id", 2)
-        super().__init__(bos_token_id=self.bos_token_id, eos_token_id=self.eos_token_id, **kwargs)
-        
-        # Random configuration
-        self.seed: int = kwargs.get("seed", 42)
-        
-        # Path configuration
-        self.save_dir: str | os.PathLike | None = kwargs.get("save_dir", "./output")
-        self.model_name: str | None = kwargs.get("model_name", None)
-        self.data_path: str | os.PathLike | None = kwargs.get("data_path", "./data/pretrain_t2t_mini.jsonl")
+@dataclass
+class TokenizerConfig:
+    """Tokenizer configuration"""
+    vocab_size: int = 6400
+    tokenizer_name: str = "minimind"
+    tokenizer_root: str = "./model/minimind"
+    bos_token_id: int = 1
+    eos_token_id: int = 2
 
-        # Training configuration
-        self.epochs: int = kwargs.get("epochs", 2)
-        self.batch_size: int = kwargs.get("batch_size", 32)
-        self.block_size: int = kwargs.get("block_size", 128)
-        self.learning_rate: float = kwargs.get("learning_rate", 0.001)
-        self.device: str = kwargs.get("device", "cuda:0")
-        self.dtype: str = kwargs.get("dtype", "bfloat16")
-        self.num_workers: int = kwargs.get("num_workers", 8)
-        self.accumulation_steps: int = kwargs.get("accumulation_steps", 8)
-        self.grad_clip: float = kwargs.get("grad_clip", 1.0)
-        self.log_interval: int = kwargs.get("log_interval", 100)
-        self.save_interval: int = kwargs.get("save_interval", 1000)
-        self.use_checkpoint: int = kwargs.get("use_checkpoint", 0)
-        self.checkpoint_path: str | None = kwargs.get("checkpoint_path", None)
-        
-        # Tokenizer configuration
-        self.tokenizer_path: str = kwargs.get("tokenizer_path", "./model/minimind")
-        self.vocab_size: int = kwargs.get("vocab_size", 6400)
+@dataclass
+class ModelConfig:
+    """Model architecture configuration"""
+    vocab_size: int = 6400
+    context_length: int = 256
+    d_model: int = 512
+    num_layers: int = 4
+    num_heads: int = 16
+    d_ff: int = 1344
+    rope_theta: float = 10000.0
+    rms_norm_eps: float = 1e-6
 
-        # Model configuration
-        self.hidden_size: int = kwargs.get("hidden_size", 768)                      # Model dimension
-        self.num_hidden_layers: int = kwargs.get("num_hidden_layers", 8)            # Number of layers
-        self.num_attention_heads: int = kwargs.get("num_attention_heads", 8)        # Number of attention heads
-        self.intermediate_size: int = kwargs.get("intermediate_size", math.ceil(self.hidden_size * math.pi / 64) * 64)           # Feedforward dimension = 8/3 * hidden_size
-        self.max_seq_len: int = kwargs.get("max_seq_len", 340)                      # Maximum sequence length of the model
-        self.hidden_act: str = kwargs.get("hidden_act", 'silu')
-        self.max_position_embeddings: int = kwargs.get("max_position_embeddings", 32768)
-        self.rms_norm_eps: float = kwargs.get("rms_norm_eps", 1e-6)
-        self.rope_theta: float = kwargs.get("rope_theta", 1e6)
-        self.q_k_dim: int = kwargs.get("q_k_dim", 64)
-        self.attention_dropout: float = kwargs.get("attention_dropout", 0.0)
+@dataclass
+class TrainingConfig:
+    """Training configuration"""
+    epochs: int = 6000
+    batch_size: int = 32
+    lr: float = 1e-5
+    betas: tuple[float, float] = (0.9, 0.999)
+    weight_decay: float = 0.001
+    valid_interval: int = 150
+    gradient_clip: float = 1.0
+    print_interval: int = 20
+    from_weight: Optional[str] | None = None
 
-        # MOE configuration (Not used)
-        self.use_moe: int = kwargs.get("use_moe", 0)                    # Whether to use MOE, 0 for no, 1 for yes
-        
-        # Wandb configuration
-        self.use_wandb: int = kwargs.get("use_wandb", 0)             # Whether to use Wandb, 0 for no, 1 for yes
-        self.wandb_project: str | None = kwargs.get("wandb_project", "minisnail")
-        
-        # Generate configuration
-        self.max_generate_token: int = kwargs.get("max_generate_token", 340)
-        self.temperature: float = kwargs.get("temperature", 0.8)
-        self.top_k: int = kwargs.get("top_k", 50)
+@dataclass
+class SchedulerConfig:
+    """Learning rate scheduler configuration"""
+    max_learning_rate: float = 3e-4
+    min_learning_rate: float = 1e-5
+    warmup_iters: int = 500
+    cosine_cycle_iters: int = 10000
+
+@dataclass
+class DataConfig:
+    """Data configuration"""
+    train_data_path: str = "./data/tinystories_train.npy"
+    valid_data_path: str = "./data/tinystories_valid.npy"
+    save_model_dir: str = "./output/"
+    dataset_name: str = "TinyStoriesV2-GPT4"
+
+@dataclass
+class SystemConfig:
+    """System configuration"""
+    device: str = "cuda"
+    seed: int = 42
+
+@dataclass
+class GenerationConfig:
+    """Generation configuration"""
+    max_tokens: int = 5000
+    temperature: float = 0.8
+    top_k: int = 5
+    eos_token: str = "<|endoftext|>"
+    device: str = "cuda"
+
+@dataclass
+class WandbConfig:
+    """Wandb configuration"""
+    entity: str = "lettle-hong"
+    project: str = "MiniSnail"
+
+@dataclass
+class SnailConfig:
+    """Complete training configuration"""
+    tokenizer: TokenizerConfig = field(default_factory=TokenizerConfig)
+    model: ModelConfig = field(default_factory=ModelConfig)
+    training: TrainingConfig = field(default_factory=TrainingConfig)
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    data: DataConfig = field(default_factory=DataConfig)
+    system: SystemConfig = field(default_factory=SystemConfig)
+    generation: GenerationConfig = field(default_factory=GenerationConfig)
+    wandb: WandbConfig = field(default_factory=WandbConfig)
+    
+    @classmethod
+    def from_dict(cls, config_dict: dict) -> "SnailConfig":
+        """Create configuration from dictionary"""
+        return cls(
+            tokenizer=TokenizerConfig(**config_dict.get("tokenizer", {})),
+            model=ModelConfig(**config_dict.get("model", {})),
+            training=TrainingConfig(**config_dict.get("training", {})),
+            scheduler=SchedulerConfig(**config_dict.get("scheduler", {})),
+            data=DataConfig(**config_dict.get("data", {})),
+            system=SystemConfig(**config_dict.get("system", {})),
+            generation=GenerationConfig(**config_dict.get("generation", {})),
+            wandb=WandbConfig(**config_dict.get("wandb", {})),
+        )
+    
+    @classmethod
+    def from_json(cls, json_path: str) -> "SnailConfig":
+        """Load configuration from JSON file"""
+        with open(json_path, 'r', encoding='utf-8') as f:
+            config_dict = json.load(f)
+        return cls.from_dict(config_dict)
+    
+    def to_dict(self) -> dict:
+        """Convert to dictionary"""
+        return {
+            "tokenizer": self.tokenizer.__dict__,
+            "model": self.model.__dict__,
+            "training": self.training.__dict__,
+            "scheduler": self.scheduler.__dict__,
+            "data": self.data.__dict__,
+            "system": self.system.__dict__,
+            "generation": self.generation.__dict__,
+            "wandb": self.wandb.__dict__,
+        }
+    
+    def to_json(self, json_path: str):
+        """Save configuration to JSON file"""
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
+
+DEFAULT_CONFIG = SnailConfig()

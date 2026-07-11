@@ -219,3 +219,10 @@ __marimo__/
 
 # Encoded dataset
 *.npy
+
+config.json
+wandb
+.vscode
+*.pt
+train_loss_curve.png
+valid_loss_curve.png

@@ -1,9 +1,11 @@
-from transformers import AutoTokenizer
+from minisnail.tokenizer import get_tokenizer
+from minisnail.config import SnailConfig
 from transformers.tokenization_utils_tokenizers import TokenizersBackend
 import rich
 
 if __name__ == "__main__":
-    tokenizer: TokenizersBackend = AutoTokenizer.from_pretrained("./model")
+    config = SnailConfig()
+    tokenizer: TokenizersBackend = get_tokenizer(config)
     messages: list[dict[str, str]] = [
         {"role": "system", "content": "你是一个优秀的聊天机器人，总是给我正确的回应！"},
         {"role": "user", "content": '你来自哪里？'},
