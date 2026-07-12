@@ -15,12 +15,18 @@ def setup_seed(seed: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def read_memmap_data(train_data_path: str | os.PathLike, dtype: np.dtype = np.int32):
-    '''Read the memmap file.'''
+def read_memmap_data(train_data_path: str | os.PathLike):
+    '''
+    Read the training dataset from disk.
+    Args:
+        train_data_path (str | os.PathLike): Path to the training dataset.
+    Returns:
+        np.memmap: The training dataset as a numpy memory-mapped array.
+    '''
     return np.memmap(
         train_data_path,
+        dtype=np.int32,
         mode="r",
-        dtype=dtype,
     )
 
 def data_loader(
@@ -46,17 +52,17 @@ def data_loader(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     '''
-    # Randomly select a starting position from the dataset
+    # 1. Randomly sample start positions in the dataset for each batch
     indices = np.random.randint(
         low=0,
         high=len(dataset) - context_length,
         size=(batch_size,)
     )
-    # Get input sequences and corresponding labels from the dataset based on the starting positions
+    # 2. Get input sequences and labels from the dataset based on the start positions sampled
     inputs = np.stack([dataset[index:index+context_length] for index in indices])
     labels = np.stack([dataset[index+1:index+context_length+1] for index in indices])
     
-    # Convert numpy arrays to torch tensors and move them to the specified device
+    # 3. Convert numpy arrays to torch tensors and move to specified device
     return (
         torch.from_numpy(inputs).long().to(device),
         torch.from_numpy(labels).long().to(device)

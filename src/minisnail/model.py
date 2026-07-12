@@ -125,8 +125,6 @@ class MultiHeadSelfAttention(nn.Module):
         self.rope_embedding = rope_embedding
 
     def forward(self, X: Float[Tensor, " ... sequence_length d_in"]) -> Float[Tensor, " ... sequence_length d_out"]:
-        seq_len = X.shape[-2]
-
         # 1. Linear projection to get Q K V (all heads together)
         Q = self.W_Q(X)
         K = self.W_K(X)
@@ -143,9 +141,7 @@ class MultiHeadSelfAttention(nn.Module):
             K = self.rope_embedding(K)
 
         # 3. Use causal encoding to calculate scaled dot-product attention
-        mask = torch.tril(torch.ones(seq_len, seq_len, device=X.device))
-
-        multi_head_output: Float[Tensor, " ... queries d_v"] = F.scaled_dot_product_attention(Q, K, V, mask)
+        multi_head_output: Float[Tensor, " ... queries d_v"] = F.scaled_dot_product_attention(Q, K, V, is_causal=True)
         multi_head_output = rearrange(multi_head_output, "... num_heads seq_len d_v -> ... seq_len (num_heads d_v)")
 
         output = self.W_O(multi_head_output)

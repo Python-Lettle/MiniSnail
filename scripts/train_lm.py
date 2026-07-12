@@ -2,6 +2,7 @@ from minisnail.debug import console, DEBUG, LossMonitor
 from minisnail.functions import cross_entropy_loss, cosine_schedule, gradient_clipping
 from minisnail.config import SnailConfig, DEFAULT_CONFIG
 from minisnail.model import init_model
+from minisnail.util import read_memmap_data, data_loader
 import torch
 from typing import IO, BinaryIO
 from tqdm import tqdm
@@ -11,45 +12,6 @@ import os
 import time
 import argparse
 import wandb
-
-def data_loader(
-    dataset: npt.NDArray,
-    batch_size: int,
-    context_length: int,
-    device,
-)-> tuple[torch.Tensor, torch.Tensor]:
-    '''
-    Given a dataset (a 1D numpy array of integers) and a desired batch size and
-    context length, sample language modeling input sequences and their corresponding
-    labels from the dataset.
-
-    Args:
-        dataset (np.array): 1D numpy array of integer token IDs in the dataset.
-        batch_size (int): Desired batch size to sample.
-        context_length (int): Desired context length of each sampled example.
-        device (str): PyTorch device string (e.g., 'cpu' or 'cuda:0') indicating the device
-            to place the sampled input sequences and labels on.
-
-    Returns:
-        Tuple of torch.LongTensors of shape (batch_size, context_length). The first tuple item
-        is the sampled input sequences, and the second tuple item is the corresponding
-        language modeling labels.
-    '''
-    # 1. Randomly sample start positions in the dataset for each batch
-    indices = np.random.randint(
-        low=0,
-        high=len(dataset) - context_length,
-        size=(batch_size,)
-    )
-    # 2. Get input sequences and labels from the dataset based on the start positions sampled
-    inputs = np.stack([dataset[index:index+context_length] for index in indices])
-    labels = np.stack([dataset[index+1:index+context_length+1] for index in indices])
-    
-    # 3. Convert numpy arrays to torch tensors and move to specified device
-    return (
-        torch.from_numpy(inputs).long().to(device),
-        torch.from_numpy(labels).long().to(device)
-    )
 
 def save_checkpoint(
 	model: torch.nn.Module,
@@ -110,20 +72,6 @@ def load_checkpoint(
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     
     return checkpoint['iteration']
-
-def read_memmap_data(train_data_path: str | os.PathLike):
-    '''
-    Read the training dataset from disk.
-    Args:
-        train_data_path (str | os.PathLike): Path to the training dataset.
-    Returns:
-        np.memmap: The training dataset as a numpy memory-mapped array.
-    '''
-    return np.memmap(
-        train_data_path,
-        dtype=np.int32,
-        mode="r",
-    )
 
 def val_iterator(memmap_arr, batch_size, context_length):
     N = len(memmap_arr)
@@ -186,15 +134,11 @@ def train_lm(config: SnailConfig = DEFAULT_CONFIG, wandb_run = None):
 
     # 3. Create the model and optimizer
     model = init_model(config, device=device)
-    # model = TransformerLM(
-    #     vocab_size, context_length, d_model, num_layers, num_heads, d_ff, rope_theta, batch_size,
-    #     device=device,
-    # ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=betas, eps=1e-8, weight_decay=weight_decay)
 
-    train_loss_monitor = LossMonitor(title="Train Loss Monitor")
-    valid_loss_monitor = LossMonitor(title="Valid Loss Monitor")
+    train_loss_monitor = LossMonitor(title="Train Loss Monitor", show_stats=False)
+    valid_loss_monitor = LossMonitor(title="Valid Loss Monitor", show_stats=False)
 
     # 4. Train the model
     for epoch in range(epochs):
@@ -302,7 +246,7 @@ def train_lm(config: SnailConfig = DEFAULT_CONFIG, wandb_run = None):
 
     # 6. Loss curve
     train_loss_monitor.finalize(save_path=os.path.join(save_model_dir, "train_loss_curve.png"))
-    # valid_loss_monitor.finalize(save_path=os.path.join(save_model_dir, "valid_loss_curve.png"))
+    valid_loss_monitor.finalize(save_path=os.path.join(save_model_dir, "valid_loss_curve.png"))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Language Model")
@@ -312,8 +256,13 @@ if __name__ == "__main__":
     # 1. Load configuration
     if args.config:
         config = SnailConfig.from_json(args.config)
+        console.print(f"Loaded config from {args.config}")
+    elif os.path.exists("config.json"):
+        config = SnailConfig.from_json("config.json")
+        console.print("Loaded config from default config.json")
     else:
         config = DEFAULT_CONFIG
+        console.print("Loaded default config")
     
     # 2. Start a new wandb run to track this script.
     run = wandb.init(

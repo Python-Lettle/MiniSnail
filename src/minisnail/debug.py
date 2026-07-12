@@ -44,18 +44,20 @@ def plot_loss_curve_basic(loss_list, title="Training Loss Curve", save_path=None
 class LossMonitor:
     """Loss Monitor"""
     
-    def __init__(self, title: str ="Loss Monitor", window_size=10, update_interval=0.1):
+    def __init__(self, title: str ="Loss Monitor", show_stats: bool = True, window_size=10, update_interval=0.1):
         # Start interactive mode
-        plt.ion()
+        if show_stats:
+            plt.ion()
         
-        # Create figure and subplots
-        self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, figsize=(12, 8))
+            # Create figure and subplots
+            self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, figsize=(12, 8))
         
         # Initialize data
         self.epochs = []
         self.losses = []
         self.moving_avg = []
         self.title = title
+        self.show_stats = show_stats
         self.window_size = window_size
         
         # Precompute statistics variables to avoid redundant calculations
@@ -66,33 +68,34 @@ class LossMonitor:
         self.count = 0
         self.first_loss = None
         
-        # Create line plots
-        self.loss_line, = self.ax1.plot([], [], 'b-', linewidth=1.5, alpha=0.7, label='Loss')
-        self.avg_line, = self.ax1.plot([], [], 'r-', linewidth=2, label=f'{window_size}-Epoch MA')
+        if show_stats:
+            # Create line plots
+            self.loss_line, = self.ax1.plot([], [], 'b-', linewidth=1.5, alpha=0.7, label='Loss')
+            self.avg_line, = self.ax1.plot([], [], 'r-', linewidth=2, label=f'{window_size}-Epoch MA')
+            
+            # Create scatter plot for recent points
+            self.recent_scatter = self.ax1.scatter([], [], color='green', s=50, zorder=5, label='Recent')
+            
+            # Create text statistics
+            self.stats_text = self.ax2.text(0.05, 0.95, '', transform=self.ax2.transAxes, 
+                                            verticalalignment='top', fontsize=10,
+                                            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            
+            # Set plot properties
+            self.ax1.set_title(title, fontsize=14, fontweight='bold')
+            self.ax1.set_xlabel('Epoch')
+            self.ax1.set_ylabel('Loss')
+            self.ax1.grid(True, alpha=0.3)
+            self.ax1.legend(loc='upper right')
+            
+            # Hide second axis (used for text display)
+            self.ax2.axis('off')
         
-        # Create scatter plot for recent points
-        self.recent_scatter = self.ax1.scatter([], [], color='green', s=50, zorder=5, label='Recent')
-        
-        # Create text statistics
-        self.stats_text = self.ax2.text(0.05, 0.95, '', transform=self.ax2.transAxes, 
-                                        verticalalignment='top', fontsize=10,
-                                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-        
-        # Set plot properties
-        self.ax1.set_title(title, fontsize=14, fontweight='bold')
-        self.ax1.set_xlabel('Epoch')
-        self.ax1.set_ylabel('Loss')
-        self.ax1.grid(True, alpha=0.3)
-        self.ax1.legend(loc='upper right')
-        
-        # Hide second axis (used for text display)
-        self.ax2.axis('off')
-        
-        # Set update interval
-        self.update_interval = update_interval
-        self.last_update_time = time.time()
-        
-        plt.tight_layout()
+            # Set update interval
+            self.update_interval = update_interval
+            self.last_update_time = time.time()
+            
+            plt.tight_layout()
     
     def _calculate_moving_average(self):
         """Calculate moving average"""
@@ -149,6 +152,10 @@ class LossMonitor:
             self.moving_avg.append(avg)
         
         # Check if plot needs update
+        if not self.show_stats:
+            return is_min_loss
+        
+        # Update plot if time interval has passed
         current_time = time.time()
         if current_time - self.last_update_time >= self.update_interval:
             self._update_plot()
@@ -191,6 +198,12 @@ class LossMonitor:
     
     def finalize(self, save_path="./data/model/loss_curve.png"):
         """Finalize training, show final plot"""
+        # Save Loss plot
+        plot_loss_curve_basic(self.losses, title=self.title, save_path=save_path)
+        
+        if not self.show_stats:
+            return
+        
         # Ensure the update is called one last time to show the final state
         self._update_plot()
         
@@ -203,8 +216,5 @@ class LossMonitor:
             self.ax1.plot(self.epochs[min_idx], self.losses[min_idx], 'r*', 
                          markersize=15, label=f'Min Loss: {self.losses[min_idx]:.4f}')
             self.ax1.legend()
-        
-        # Save Loss plot
-        plot_loss_curve_basic(self.losses, title=self.title, save_path=save_path)
 
         plt.show()
