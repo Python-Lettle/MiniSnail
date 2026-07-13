@@ -8,8 +8,8 @@ from minisnail.generate import generate_text
 if __name__ == '__main__':
     config = SnailConfig.from_json("./config.json")
     tokenizer: TokenizersBackend = get_tokenizer(config)
+    # The model will load the weight from config.training.from_weight
     model: SnailModel = init_model(config)
-    model.load_state_dict(torch.load("./output/model_best.pt"))
     model.eval()
     model.to(device=torch.device(config.system.device))
     

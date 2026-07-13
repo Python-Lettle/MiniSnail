@@ -220,7 +220,7 @@ class SnailModel(nn.Module):
     @torch.no_grad()
     def generate(self, X: torch.Tensor,
         attention_mask=None,
-        max_new_tokens=8192,
+        max_tokens=8192,
         temperature=0.85,
         top_p=0.85,
         top_k=50,
@@ -230,41 +230,40 @@ class SnailModel(nn.Module):
         num_return_sequences=1,
         do_sample=True,
         repetition_penalty=1.0,
-        **kwargs
     ):
         if X.dim() == 1:
             X = X.unsqueeze(0)
-        
+
+        # Ensure token indices are long for nn.Embedding
+        X = X.long()
         original_sequence_length = X.size(-1)
 
-        for _ in range(max_new_tokens):
+        for _ in range(max_tokens):
             # If the prompt exceeds the context_length, truncate the prompt.
             X = X[:, -self.config.model.context_length:] if X.size(1) > self.config.model.context_length else X
             # Get logits
             logits = self.forward(X)
             # Get the logits for the next token
             next_token_logits = logits[:, -1]
-            # Temperature scale
-            temperature_scaled_next_token_logits = next_token_logits / temperature
-            # If top-k is provided, only the top-k tokens will be considered
-            if top_k:
-                topk_values, _ = torch.topk(
-                    temperature_scaled_next_token_logits,
-                    min(top_k, temperature_scaled_next_token_logits.size(-1)),
-                )
-                # Obtain the score of the token with the highest score among the top-k tokens
-                threshold = topk_values[:, -1]
-                top_k_mask = temperature_scaled_next_token_logits < threshold
-                temperature_scaled_next_token_logits.masked_fill(top_k_mask, float("-inf"))
-            # Top-p sampling
-            # if top_p < 1.0:
-            #     sorted_logits, sorted_indices = torch.sort(temperature_scaled_next_token_logits, descending=True)
-            #     mask = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1) > top_p
-            #     mask[..., 1:], mask[..., 0] = mask[..., :-1].clone(), 0
-            #     temperature_scaled_next_token_logits[mask.scatter(1, sorted_indices, mask)] = -float('inf')
-            
-            next_token_probabilities = F.softmax(temperature_scaled_next_token_logits, dim=-1)
-            next_token_id = torch.multinomial(next_token_probabilities, 1)
+
+            if do_sample:
+                # Temperature scale
+                temperature_scaled_next_token_logits = next_token_logits / temperature
+                # If top-k is provided, only the top-k tokens will be considered
+                if top_k:
+                    topk_values, _ = torch.topk(
+                        temperature_scaled_next_token_logits,
+                        min(top_k, temperature_scaled_next_token_logits.size(-1)),
+                    )
+                    # Obtain the score of the token with the highest score among the top-k tokens
+                    threshold = topk_values[:, -1]
+                    top_k_mask = temperature_scaled_next_token_logits < threshold
+                    temperature_scaled_next_token_logits = temperature_scaled_next_token_logits.masked_fill(top_k_mask, float("-inf"))
+
+                next_token_probabilities = F.softmax(temperature_scaled_next_token_logits, dim=-1)
+                next_token_id = torch.multinomial(next_token_probabilities, 1)
+            else:
+                next_token_id = next_token_logits.argmax(dim=-1, keepdim=True)
 
             # Upon encountering an EOS token, stop generating
             if eos_token_id is not None and next_token_id.item() == eos_token_id:

@@ -14,7 +14,7 @@ def generate_text(model: SnailModel, tokenizer: TokenizersBackend, prompt: str, 
     model.eval()
 
     prompt_ids: list[int] = tokenizer.encode(prompt)
-    prompt_tensor: torch.Tensor = torch.tensor([prompt_ids], dtype=torch.int32, device=device)
+    prompt_tensor: torch.Tensor = torch.tensor([prompt_ids], dtype=torch.long, device=device)
 
     start_time = time.time()
     with torch.no_grad():
