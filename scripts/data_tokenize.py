@@ -1,117 +1,157 @@
 import json
 import os
-import random
+import gc
 import argparse
 import time
 from tqdm import tqdm
 import numpy as np
-from datasets import Dataset
-from transformers import AutoTokenizer
-from transformers.tokenization_utils_tokenizers import TokenizersBackend
+import multiprocessing as mp
 
-from minisnail.util import console, read_memmap_data
+_tokenizer = None
 
-def encode_txt_nparray(tokenizer: TokenizersBackend, input_path, train_output_path, valid_output_path, train_ratio=0.8, is_json=False):
-    start_time = time.time()
+
+def _init_worker(tokenizer_path: str):
+    """After fork, each worker loads the tokenizer on init (lazy import to avoid loading transformers in the main process)."""
+    global _tokenizer
+    abs_path = os.path.abspath(tokenizer_path)
+    from transformers import AutoTokenizer
+    _tokenizer = AutoTokenizer.from_pretrained(
+        abs_path,
+        local_files_only=True,
+        trust_remote_code=True,
+    )
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    print(f"Tokenizer loaded from {abs_path}, with bos_token_id={_tokenizer.bos_token_id}, eos_token_id={_tokenizer.eos_token_id}")
+
+
+def _encode_chunk(task):
+    """Encode a batch of json lines, return (split_tag, chunk_id, np.int32 array)."""
+    split_tag, chunk_id, lines = task
+    texts = []
+    for line in lines:
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            t = data.get("text") or data.get("content") or data.get("s") or ""
+            if not t and "prompt" in data and "answer" in data:
+                t = data["prompt"] + data["answer"]
+            if t:
+                texts.append(t)
+        elif isinstance(data, str):
+            texts.append(data)
+    if not texts:
+        return (split_tag, chunk_id, np.array([], dtype=np.int32))
     
-    # Calculate total lines in the file
-    with open(input_path, "r", encoding="utf-8") as f:
-        total_lines = sum(1 for line in f if line.strip())
-    console.print(f"total_lines: {total_lines}")
-
-    # Split point
-    train_end = int(total_lines * train_ratio)
-    console.print(f"train_lines: {train_end}, valid_lines: {total_lines - train_end}")
+    bos_token_id: int = _tokenizer.bos_token_id
+    eos_token_id: int = _tokenizer.eos_token_id
     
-    # Generate line indices and shuffle them
-    line_indices = list(range(total_lines))
-    random.shuffle(line_indices)
+    enc = _tokenizer(texts, padding=False, truncation=False, add_special_tokens=False)
+    ids = []
+    for x in enc["input_ids"]:
+        if bos_token_id is not None:
+            ids.append(bos_token_id)
+        ids.extend(x)
+        if eos_token_id is not None:
+            ids.append(eos_token_id)
+    return (split_tag, chunk_id, np.array(ids, dtype=np.int32))
 
-    train_indices = set(line_indices[:train_end])
-    valid_indices = set(line_indices[train_end:])
 
-    # Calculate tokens in train and valid sets
-    train_tokens = 0
-    valid_tokens = 0
-
-    with open(input_path, "r", encoding="utf-8") as fin:
-        for line_num, line in enumerate(tqdm(fin, total=total_lines, desc="Counting tokens")):
-            line = line.strip()
-            if not line:
-                continue
-            if is_json:
-                try:
-                    data = json.loads(line)
-                    text = data.get("text", "")
-                except json.JSONDecodeError as e:
-                    console.print(f"Skipping invalid JSON at line {line_num}: {e}")
-                    continue
-            else:
-                text = line
-            
-            tokens = tokenizer.encode(text)
-            if line_num in train_indices:
-                train_tokens += len(tokens)
-            elif line_num in valid_indices:
-                valid_tokens += len(tokens)
-    
-    console.print(f"train_tokens: {train_tokens}, valid_tokens: {valid_tokens}")
-
-    # Create mmap files
-    train_arr = np.memmap(train_output_path, mode="w+", dtype=np.int32, shape=(train_tokens,))
-    valid_arr = np.memmap(valid_output_path, mode="w+", dtype=np.int32, shape=(valid_tokens,))
-
-    # Write
-    train_idx = 0
-    valid_idx = 0
-
-    with open(input_path, "r", encoding="utf-8") as fin:
-        for line_num, line in enumerate(tqdm(fin, total=total_lines, desc="Encoding")):
-            line = line.strip()
-            if not line:
-                continue
-            if is_json:
-                try:
-                    data = json.loads(line)
-                    text = data.get("text", "")
-                except json.JSONDecodeError:
-                    continue
-            else:
-                text = line
-            
-            tokens = tokenizer.encode(text)
-            n = len(tokens)
-            
-            if line_num in train_indices:
-                train_arr[train_idx:train_idx + n] = tokens
-                train_idx += n
-            elif line_num in valid_indices:
-                valid_arr[valid_idx:valid_idx + n] = tokens
-                valid_idx += n
-    
-    # Flush the mmap files
-    train_arr.flush()
-    valid_arr.flush()
-
-    console.print(f"Train set saved to: {train_output_path}, size: {train_tokens * 4 / 1024 / 1024:.2f} MB")
-    console.print(f"Valid set saved to: {valid_output_path}, size: {valid_tokens * 4 / 1024 / 1024:.2f} MB")
-    console.print(f"Encoding time: {time.time() - start_time:.2f} seconds")
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="MiniSnail Data Preprocessing")
-    parser.add_argument("--tokenizer_path", type=str, default="./model/minimind", help="Tokenizer path")
-    parser.add_argument("--data_path", type=str, default="./data/testdata.txt", help="Raw data path")
-    parser.add_argument("--train_output_path", type=str, default="./data/train_dataset.npy", help="Path to train file")
-    parser.add_argument("--valid_output_path", type=str, default="./data/valid_dataset.npy", help="Path to valid file")
-    parser.add_argument("--train_ratio", type=float, default=0.8, help="Ratio of train data")
-    parser.add_argument("--is_json", type=bool, default=True, help="Whether the input file is in JSON format")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for shuffling")
+def main():
+    parser = argparse.ArgumentParser(
+        description="MiniSnail Parallel Data Preprocessing (fully streaming)"
+    )
+    parser.add_argument("--tokenizer_path", default="./model/minimind")
+    parser.add_argument("--data_path", default="./data/pretrain_t2t_mini.jsonl")
+    parser.add_argument("--train_output_path", default="./data/train_dataset.npy")
+    parser.add_argument("--valid_output_path", default="./data/valid_dataset.npy")
+    parser.add_argument("--train_ratio", type=float, default=0.8)
+    parser.add_argument("--chunk_size", type=int, default=2000)
+    parser.add_argument("--num_workers", type=int, default=None)
     args = parser.parse_args()
 
-    tokenizer: TokenizersBackend = AutoTokenizer.from_pretrained(args.tokenizer_path)
-    
-    random.seed(args.seed)
-    np.random.seed(args.seed)
+    if args.num_workers is None:
+        args.num_workers = mp.cpu_count()
+    print(f"Workers: {args.num_workers} | Chunk size: {args.chunk_size}")
 
-    encode_txt_nparray(tokenizer, args.data_path, args.train_output_path, args.valid_output_path, train_ratio=args.train_ratio, is_json=args.is_json)
-    
+    t0 = time.time()
+
+    # First pass to count total lines (pure IO, used to determine train/valid split point)
+    print("Counting lines (single pass)...")
+    total = 0
+    with open(args.data_path, "r", encoding="utf-8") as f:
+        for _ in f:
+            total += 1
+    train_end = int(total * args.train_ratio)
+    print(f"Total lines: {total:,}  Train end (line#): {train_end:,}")
+
+    train_f = open(args.train_output_path, "wb")
+    valid_f = open(args.valid_output_path, "wb")
+    train_tok = 0
+    valid_tok = 0
+
+    buf_train = []
+    buf_valid = []
+    cid = 0
+
+    def gen_chunks():
+        """Route to train/valid by line number, yield when a chunk is full (without pre-reading all lines)."""
+        nonlocal buf_train, buf_valid, cid
+        line_no = 0
+        with open(args.data_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                line_no += 1
+                if line_no <= train_end:
+                    buf_train.append(line)
+                    if len(buf_train) >= args.chunk_size:
+                        yield ("train", cid, buf_train)
+                        cid += 1
+                        buf_train = []   # Rebind; the old list is held by the worker, safe
+                else:
+                    buf_valid.append(line)
+                    if len(buf_valid) >= args.chunk_size:
+                        yield ("valid", cid, buf_valid)
+                        cid += 1
+                        buf_valid = []
+        if buf_train:
+            yield ("train", cid, buf_train)
+            cid += 1
+        if buf_valid:
+            yield ("valid", cid, buf_valid)
+            cid += 1
+
+    n_chunks = (train_end // args.chunk_size + 1) + ((total - train_end) // args.chunk_size + 1)
+
+    with mp.Pool(args.num_workers, initializer=_init_worker, initargs=(args.tokenizer_path,)) as pool:
+        for split_tag, chunk_id, arr in tqdm(
+            pool.imap(_encode_chunk, gen_chunks(), chunksize=1),
+            total=n_chunks,
+            desc="Encoding",
+        ):
+            if split_tag == "train":
+                arr.tofile(train_f)
+                train_tok += arr.shape[0]
+            else:
+                arr.tofile(valid_f)
+                valid_tok += arr.shape[0]
+
+    train_f.close()
+    valid_f.close()
+    gc.collect()
+
+    elapsed = time.time() - t0
+    total_tok = train_tok + valid_tok
+    print(f"\n{'=' * 60}")
+    print(f"Train tokens : {train_tok:,}  ({train_tok*4/1024/1024:.2f} MB) -> {args.train_output_path}")
+    print(f"Valid tokens : {valid_tok:,}  ({valid_tok*4/1024/1024:.2f} MB) -> {args.valid_output_path}")
+    print(f"Total tokens : {total_tok:,}")
+    print(f"Total time   : {elapsed:.1f}s ({elapsed/60:.1f} min)")
+    print(f"Throughput   : {total_tok/elapsed:,.0f} tokens/sec")
+    print(f"{'=' * 60}")
+
+if __name__ == "__main__":
+    main()

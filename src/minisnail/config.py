@@ -29,29 +29,31 @@ class TrainingConfig:
     """Training configuration"""
     epochs: int = 6000
     batch_size: int = 32
-    lr: float = 1e-5
-    betas: tuple[float, float] = (0.9, 0.999)
+    lr: float = 0
+    betas: tuple[float, float] = (0.9, 0.95)
     weight_decay: float = 0.001
-    valid_interval: int = 150
+    valid_interval: int = 400
     gradient_clip: float = 1.0
-    print_interval: int = 20
+    print_interval: int = 200
     from_weight: Optional[str] | None = None
+    use_checkpoint: bool = False
+    from_checkpoint: str | None = None
 
 @dataclass
 class SchedulerConfig:
     """Learning rate scheduler configuration"""
-    max_learning_rate: float = 3e-4
-    min_learning_rate: float = 1e-5
-    warmup_iters: int = 500
-    cosine_cycle_iters: int = 10000
+    max_learning_rate: float = 0.0005
+    min_learning_rate: float = 0.00005
+    warmup_iters: int = 600
+    cosine_cycle_iters: int = 6000
 
 @dataclass
 class DataConfig:
     """Data configuration"""
-    train_data_path: str = "./data/tinystories_train.npy"
-    valid_data_path: str = "./data/tinystories_valid.npy"
+    train_data_path: str = "./data/train_dataset.npy"
+    valid_data_path: str = "./data/valid_dataset.npy"
     save_model_dir: str = "./output/"
-    dataset_name: str = "TinyStoriesV2-GPT4"
+    dataset_name: str = "t2t"
 
 @dataclass
 class SystemConfig:
@@ -62,7 +64,8 @@ class SystemConfig:
 @dataclass
 class GenerationConfig:
     """Generation configuration"""
-    max_tokens: int = 5000
+    model_path: str = "./output/model_best.pt"
+    max_tokens: int = 512
     temperature: float = 0.8
     top_k: int = 5
     eos_token: str = "<|endoftext|>"

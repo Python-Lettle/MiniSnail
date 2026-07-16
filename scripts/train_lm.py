@@ -134,14 +134,24 @@ def train_lm(config: SnailConfig = DEFAULT_CONFIG, wandb_run = None):
 
     # 3. Create the model and optimizer
     model = init_model(config, device=device)
+    if config.training.from_weight:
+        model.load_state_dict(torch.load(config.training.from_weight))
+        console.print("[yellow]Loading model from weight:", config.training.from_weight)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=betas, eps=1e-8, weight_decay=weight_decay)
+
+    # Load checkpoint
+    start_epoch = 0
+    if config.training.use_checkpoint:
+        start_epoch = load_checkpoint(config.training.from_checkpoint, model, optimizer)
+        console.print("Load checkpoint from:", config.training.from_checkpoint)
 
     train_loss_monitor = LossMonitor(title="Train Loss Monitor", show_stats=False)
     valid_loss_monitor = LossMonitor(title="Valid Loss Monitor", show_stats=False)
 
     # 4. Train the model
-    for epoch in range(epochs):
+    console.print("Training start at epoch", start_epoch)
+    for epoch in range(start_epoch, epochs):
         try:
             # ----------------------------------------
             #                  Train

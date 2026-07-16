@@ -14,10 +14,6 @@ def init_model(config: SnailConfig, device=None, dtype=None):
     It is optional to load the model from a certain weight file.
     '''
     model = SnailModel(config, device=device, dtype=dtype)
-    if config.training.from_weight:
-        model.load_state_dict(torch.load(config.training.from_weight))
-        console.print("[yellow]Loading model from weight:", config.training.from_weight)
-
     return model.to(device)
 
 class PWFFN(nn.Module):
