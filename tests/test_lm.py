@@ -18,6 +18,6 @@ if __name__ == '__main__':
     model.eval()
     model.to(device=torch.device(config.system.device))
     
-    prompt: str = "如果今天下雨，地面就会湿。今天下雨了，所以地面"
+    prompt: str = "我想知道中国的历史，"
     generate_text(model, tokenizer, prompt, config)
        

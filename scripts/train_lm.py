@@ -17,6 +17,7 @@ def save_checkpoint(
 	model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     iteration: int,
+    run: wandb.Run,
     out: str | os.PathLike | BinaryIO | IO[bytes],
 ):
     """
@@ -39,39 +40,31 @@ def save_checkpoint(
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'iteration': iteration,
+            'wandb_id': run.id,
         },
         out
     )
 
 def load_checkpoint(
     src: str | os.PathLike | BinaryIO | IO[bytes],
-    model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
-) -> int:
+) -> dict[str, any]:
     """
     Given a serialized checkpoint (path or file-like object), restore the
     serialized state to the given model and optimizer.
-    Return the number of iterations that we previously serialized in
-    the checkpoint.
+    Return the checkpoint state.
 
     Args:
         src (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialized checkpoint.
-        model (torch.nn.Module): Restore the state of this model.
-        optimizer (torch.optim.Optimizer): Restore the state of this optimizer.
     Returns:
-        int: the previously-serialized number of iterations.
+        dict[str, any]: A dictionary of the checkpoint state.
     """
-    # 1. Load the checkpoint from the file or object
+    # Load the checkpoint from the file or object
     if isinstance(src, str) or isinstance(src, os.PathLike):
         src = open(src, 'rb')
-    # 2. Load the model state from the checkpoint
+    # Load the model state from the checkpoint
     checkpoint = torch.load(src)
-    # 3. Load the model state from the checkpoint
-    model.load_state_dict(checkpoint['model_state_dict'])
-    # 4. Load the optimizer state from the checkpoint
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     
-    return checkpoint['iteration']
+    return checkpoint
 
 def val_iterator(memmap_arr, batch_size, context_length):
     N = len(memmap_arr)
@@ -82,7 +75,7 @@ def val_iterator(memmap_arr, batch_size, context_length):
         y = np.stack([memmap_arr[i+1:i+context_length+1] for i in range(base, base+batch_size)])
         yield torch.tensor(x, dtype=torch.long), torch.tensor(y, dtype=torch.long)
 
-def train_lm(config: SnailConfig = DEFAULT_CONFIG, wandb_run = None):
+def train_lm(config: SnailConfig = DEFAULT_CONFIG, wandb_run = None, checkpoint = None):
     # 1. Prepare training parameters
     train_data_path = config.data.train_data_path
     valid_data_path = config.data.valid_data_path
@@ -140,16 +133,18 @@ def train_lm(config: SnailConfig = DEFAULT_CONFIG, wandb_run = None):
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=betas, eps=1e-8, weight_decay=weight_decay)
 
-    # Load checkpoint
+    # 4. Load checkpoint
     start_epoch = 0
-    if config.training.use_checkpoint:
-        start_epoch = load_checkpoint(config.training.from_checkpoint, model, optimizer)
-        console.print("Load checkpoint from:", config.training.from_checkpoint)
+    if checkpoint is not None:
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['iteration']
+        console.print("Load checkpoint from:", start_epoch)
 
     train_loss_monitor = LossMonitor(title="Train Loss Monitor", show_stats=False)
     valid_loss_monitor = LossMonitor(title="Valid Loss Monitor", show_stats=False)
 
-    # 4. Train the model
+    # 5. Train the model
     console.print("Training start at epoch", start_epoch)
     for epoch in range(start_epoch, epochs):
         try:
@@ -187,7 +182,7 @@ def train_lm(config: SnailConfig = DEFAULT_CONFIG, wandb_run = None):
                 wandb_run.log({
                     "train/loss": loss.item(),
                     "train/lr": current_lr,
-                })
+                }, step=epoch)
 
             # Print information
             if epoch % config.training.print_interval == 0:
@@ -221,7 +216,7 @@ def train_lm(config: SnailConfig = DEFAULT_CONFIG, wandb_run = None):
                     if wandb_run is not None:
                         wandb_run.log({
                             "valid/loss": val_loss_mean,
-                        })
+                        }, step=epoch)
                     if is_min_loss:
                         torch.save(model.state_dict(), os.path.join(save_model_dir, "model_best.pt"))
 
@@ -231,30 +226,30 @@ def train_lm(config: SnailConfig = DEFAULT_CONFIG, wandb_run = None):
             console.print(f"Max token ID: {inputs.max()}")
             console.print(f"Max token ID: {targets.max()}")
             # Save checkpoint
-            save_checkpoint(model, optimizer, epoch, os.path.join(save_model_dir, "checkpoint.pt"))
+            save_checkpoint(model, optimizer, epoch, run, os.path.join(save_model_dir, "checkpoint.pt"))
             console.print(f"Checkpoint saved at epoch {epoch+1}")
             console.print("="*50)
             return
         except KeyboardInterrupt:
             console.print(f"KeyboardInterrupt in epoch {epoch+1}")
             # Save checkpoint
-            save_checkpoint(model, optimizer, epoch, os.path.join(save_model_dir, "checkpoint.pt"))
+            save_checkpoint(model, optimizer, epoch, run, os.path.join(save_model_dir, "checkpoint.pt"))
             console.print(f"Checkpoint saved at epoch {epoch+1}")
             console.print("="*50)
             return
         except Exception as e:
             console.print(f"Error in epoch {epoch+1}: {e}")
             # Save checkpoint
-            save_checkpoint(model, optimizer, epoch, os.path.join(save_model_dir, "checkpoint.pt"))
+            save_checkpoint(model, optimizer, epoch, run, os.path.join(save_model_dir, "checkpoint.pt"))
             console.print(f"Checkpoint saved at epoch {epoch+1}")
             console.print("="*50)
             return
     
-    # 5. Save model
+    # 6. Save model
     torch.save(model.state_dict(), os.path.join(save_model_dir, "model_new.pt"))
     console.print(f"Model saved to {os.path.join(save_model_dir, 'model_new.pt')}")
 
-    # 6. Loss curve
+    # 7. Loss curve
     train_loss_monitor.finalize(save_path=os.path.join(save_model_dir, "train_loss_curve.png"))
     valid_loss_monitor.finalize(save_path=os.path.join(save_model_dir, "valid_loss_curve.png"))
 
@@ -273,19 +268,40 @@ if __name__ == "__main__":
     else:
         config = DEFAULT_CONFIG
         console.print("Loaded default config")
+
+    # 2. Load checkpoint
+    if config.training.use_checkpoint:
+        checkpoint = load_checkpoint(config.training.from_checkpoint)
+        console.print(f"Loaded checkpoint from {config.training.from_checkpoint}, iteration: {checkpoint['iteration']}, wandb_id: {checkpoint['wandb_id']}")
+    else:
+        checkpoint = None
     
-    # 2. Start a new wandb run to track this script.
-    run = wandb.init(
-        # Set the wandb entity where your project will be logged (generally your team name).
-        entity=config.wandb.entity,
-        # Set the wandb project where this run will be logged.
-        project=config.wandb.project,
-        # Track hyperparameters and run metadata.
-        config=config,
-    )
+    # 3. Start a new wandb run to track this script.
+    if config.training.use_checkpoint:
+        run = wandb.init(
+            # Set the wandb entity where your project will be logged (generally your team name).
+            entity=config.wandb.entity,
+            # Set the wandb project where this run will be logged.
+            project=config.wandb.project,
+            # Track hyperparameters and run metadata.
+            config=config,
+            id=checkpoint['wandb_id'],
+            resume="allow",
+        )
+        console.print(f"Resumed training from checkpoint, id: {run.id}")
+    else:
+        run = wandb.init(
+            # Set the wandb entity where your project will be logged (generally your team name).
+            entity=config.wandb.entity,
+            # Set the wandb project where this run will be logged.
+            project=config.wandb.project,
+            # Track hyperparameters and run metadata.
+            config=config,
+        )
+        console.print(f"Started new training, id: {run.id}")
 
     start_time = time.time()
-    train_lm(config, run)
+    train_lm(config, run, checkpoint)
     end_time = time.time()
 
     console.print(f"Training time: {end_time - start_time:.2f} seconds")
