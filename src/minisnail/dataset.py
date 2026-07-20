@@ -1,9 +1,9 @@
 import os
 import torch
+import random
 import numpy as np
 from datasets import load_dataset
 from torch.utils.data import Dataset, DataLoader
-from minisnail.util import console, read_memmap_data
 
 def get_dataloader(
     data_path: str,
@@ -28,6 +28,8 @@ def get_dataloader(
         prefetch_factor=4 if num_workers > 0 else None,
     )
     return dataloader
+
+# ---------- PretrainDataset ----------
 
 class PretrainDataset(Dataset):
     """
@@ -75,7 +77,6 @@ class PretrainDataset(Dataset):
         
         return x, y
 
-
 class JSONLDataset(Dataset):
     def __init__(self, data_path, tokenizer, max_length=512):
         super().__init__()
@@ -95,3 +96,17 @@ class JSONLDataset(Dataset):
         labels = input_ids.clone()
         labels[input_ids == self.tokenizer.pad_token_id] = -100
         return input_ids, labels
+
+# ---------- SFTDataset ----------
+
+class SFTDataset(Dataset):
+    def __init__(self, input_path, labels_path):
+        self.input_ids = np.load(input_path)
+        self.labels    = np.load(labels_path)
+
+    def __len__(self):
+        return len(self.input_ids)
+
+    def __getitem__(self, index):
+        return (torch.tensor(self.input_ids[index], dtype=torch.long),
+                torch.tensor(self.labels[index], dtype=torch.long))

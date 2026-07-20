@@ -16,7 +16,7 @@ class TokenizerConfig:
 class ModelConfig:
     """Model architecture configuration"""
     vocab_size: int = 6400
-    context_length: int = 256
+    context_length: int = 512
     d_model: int = 512
     num_layers: int = 4
     num_heads: int = 16
@@ -34,6 +34,7 @@ class TrainingConfig:
     weight_decay: float = 0.001
     valid_interval: int = 400
     gradient_clip: float = 1.0
+    accumulation_steps: int = 1                 # TODO
     print_interval: int = 200
     from_weight: Optional[str] | None = None
     use_checkpoint: bool = False
@@ -52,6 +53,10 @@ class DataConfig:
     """Data configuration"""
     train_data_path: str = "./data/train_dataset.npy"
     valid_data_path: str = "./data/valid_dataset.npy"
+
+    input_ids_path: str = "./data/sft_input_ids.npy"
+    labels_path: str = "./data/sft_labels.npy"
+
     save_model_dir: str = "./output/"
     dataset_name: str = "t2t"
 
@@ -67,8 +72,7 @@ class GenerationConfig:
     model_path: str = "./output/model_best.pt"
     max_tokens: int = 512
     temperature: float = 0.8
-    top_k: int = 5
-    eos_token: str = "<|endoftext|>"
+    top_k: int = 40
     device: str = "cuda"
 
 @dataclass
@@ -76,6 +80,7 @@ class WandbConfig:
     """Wandb configuration"""
     entity: str = "lettle-hong"
     project: str = "MiniSnail"
+    id: str | None = None
 
 @dataclass
 class SnailConfig:

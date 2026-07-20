@@ -12,12 +12,17 @@ if __name__ == '__main__':
     tokenizer: TokenizersBackend = get_tokenizer(config)
     # The model will load the weight from config.training.from_weight
     model: SnailModel = init_model(config)
-    model.load_state_dict(torch.load(config.generation.model_path))
-    console.print("[yellow]Loading model from weight:", config.generation.model_path)
+    # model.load_state_dict(torch.load(config.generation.model_path))
+    model.load_state_dict(torch.load("./output/sft_best.pt"))
+    console.print("[yellow]Loading model from weight:", "./output/sft_best.pt")
 
     model.eval()
     model.to(device=torch.device(config.system.device))
     
-    prompt: str = "我想知道中国的历史，"
-    generate_text(model, tokenizer, prompt, config)
+    prompt: str = "你都有什么功能？"
+    response = model.chat(prompt, tokenizer, repetition_penalty=1.2, top_k=40, max_tokens=1024)
+    console.print("Prompt:")
+    console.print(prompt)
+    console.print("Response:")
+    console.print(response)
        

@@ -2,7 +2,7 @@ from minisnail.debug import console, DEBUG, LossMonitor
 from minisnail.functions import cross_entropy_loss, cosine_schedule, gradient_clipping
 from minisnail.config import SnailConfig, DEFAULT_CONFIG
 from minisnail.model import init_model
-from minisnail.util import read_memmap_data, data_loader
+from minisnail.util import read_memmap_data, data_loader, setup_seed
 import torch
 from typing import IO, BinaryIO
 from tqdm import tqdm
@@ -44,6 +44,8 @@ def save_checkpoint(
         },
         out
     )
+    # 3. Close the file
+    out.close()
 
 def load_checkpoint(
     src: str | os.PathLike | BinaryIO | IO[bytes],
@@ -76,6 +78,7 @@ def val_iterator(memmap_arr, batch_size, context_length):
         yield torch.tensor(x, dtype=torch.long), torch.tensor(y, dtype=torch.long)
 
 def train_lm(config: SnailConfig = DEFAULT_CONFIG, wandb_run = None, checkpoint = None):
+    setup_seed(config.system.seed)
     # 1. Prepare training parameters
     train_data_path = config.data.train_data_path
     valid_data_path = config.data.valid_data_path
@@ -246,8 +249,9 @@ def train_lm(config: SnailConfig = DEFAULT_CONFIG, wandb_run = None, checkpoint 
             return
     
     # 6. Save model
-    torch.save(model.state_dict(), os.path.join(save_model_dir, "model_new.pt"))
-    console.print(f"Model saved to {os.path.join(save_model_dir, 'model_new.pt')}")
+    final_path = os.path.join(save_model_dir, "model_new.pt")
+    torch.save(model.state_dict(), final_path)
+    console.print(f"Model saved to {final_path}")
 
     # 7. Loss curve
     train_loss_monitor.finalize(save_path=os.path.join(save_model_dir, "train_loss_curve.png"))

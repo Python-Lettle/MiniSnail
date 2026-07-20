@@ -215,55 +215,84 @@ class SnailModel(nn.Module):
 
     @torch.no_grad()
     def generate(self, X: torch.Tensor,
-        attention_mask=None,
-        max_tokens=8192,
-        temperature=0.85,
-        top_p=0.85,
-        top_k=50,
-        eos_token_id=2,
-        streamer=None,
-        use_cache=True,
-        num_return_sequences=1,
-        do_sample=True,
-        repetition_penalty=1.0,
-    ):
+                max_tokens=8192,
+                temperature=0.85,
+                repetition_penalty=1.2,
+                top_k=50,
+                eos_token_id=2,
+                do_sample=True,
+                skip_prompt=True,        # ← 新增：默认只返回新生成的 token
+                ):
         if X.dim() == 1:
             X = X.unsqueeze(0)
-
-        # Ensure token indices are long for nn.Embedding
         X = X.long()
-        original_sequence_length = X.size(-1)
+        original_length = X.size(-1)
 
         for _ in range(max_tokens):
-            # If the prompt exceeds the context_length, truncate the prompt.
-            X = X[:, -self.config.model.context_length:] if X.size(1) > self.config.model.context_length else X
-            # Get logits
+            X = X[:, -self.config.model.context_length:]
+
             logits = self.forward(X)
-            # Get the logits for the next token
-            next_token_logits = logits[:, -1]
+            next_token_logits = logits[:, -1] / temperature
 
             if do_sample:
-                # Temperature scale
-                temperature_scaled_next_token_logits = next_token_logits / temperature
-                # If top-k is provided, only the top-k tokens will be considered
+                # 在 temperature 缩放之后、top-k 之前加
+                if repetition_penalty > 1.0:
+                    # 对已生成的 token 的 logits 打折
+                    for token_id in X[0].tolist():
+                        next_token_logits[:, token_id] /= repetition_penalty
                 if top_k:
-                    topk_values, _ = torch.topk(
-                        temperature_scaled_next_token_logits,
-                        min(top_k, temperature_scaled_next_token_logits.size(-1)),
-                    )
-                    # Obtain the score of the token with the highest score among the top-k tokens
+                    topk_values, _ = torch.topk(next_token_logits, min(top_k, next_token_logits.size(-1)))
                     threshold = topk_values[:, -1]
-                    top_k_mask = temperature_scaled_next_token_logits < threshold
-                    temperature_scaled_next_token_logits = temperature_scaled_next_token_logits.masked_fill(top_k_mask, float("-inf"))
+                    next_token_logits = next_token_logits.masked_fill(
+                        next_token_logits < threshold, float("-inf")
+                    )
 
-                next_token_probabilities = F.softmax(temperature_scaled_next_token_logits, dim=-1)
-                next_token_id = torch.multinomial(next_token_probabilities, 1)
+                probs = F.softmax(next_token_logits, dim=-1)
+                next_token_id = torch.multinomial(probs, 1)
             else:
                 next_token_id = next_token_logits.argmax(dim=-1, keepdim=True)
 
-            # Upon encountering an EOS token, stop generating
+            # 遇到 EOS 停止
             if eos_token_id is not None and next_token_id.item() == eos_token_id:
                 break
+
             X = torch.cat((X, next_token_id), dim=-1)
-        new_token_ids = X[:, original_sequence_length:]
-        return new_token_ids
+
+        if skip_prompt:
+            return X[:, original_length:]   # 只返回新生成的部分
+        return X                            # 返回完整序列
+
+
+    def chat(self, message: str, tokenizer, history=None, **kwargs):
+        """
+        SFT 对话生成入口。
+
+        用法：
+            response = model.chat("你好", tokenizer)
+            print(response)
+        """
+        # 1. 构建对话历史
+        messages = history or []
+        messages.append({"role": "user", "content": message})
+
+        # 2. 用 ChatML 模板 + 添加生成提示
+        input_ids = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,   # ← 自动追加 "<|im_start|>assistant\n"
+            return_tensors="pt",
+        )["input_ids"].to(self.config.system.device)   # 或直接 .to(next(self.parameters()).device)
+
+        # 3. 生成
+        output_ids = self.generate(
+            input_ids,
+            eos_token_id=tokenizer.eos_token_id,  # =2
+            **kwargs
+        )
+
+        # 4. 解码为文本（跳过特殊 token）
+        response = tokenizer.decode(
+            output_ids[0],
+            skip_special_tokens=True,
+        )
+        return response
