@@ -155,6 +155,10 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
     console.print("Training start at epoch", start_epoch)
     global_step = checkpoint['global_step'] if checkpoint is not None else 0
     min_loss = float('inf')
+
+    steps_per_epoch = len(train_loader)
+    start_epoch = global_step // steps_per_epoch          # 从哪个 epoch 开始
+    start_step_in_epoch = global_step % steps_per_epoch   # 该 epoch 内跳过前几步
     try:
         for epoch in range(start_epoch, epochs):
             console.print(f"\n{'='*40}")
@@ -166,9 +170,10 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
             epoch_start = time.time()
 
             for step, (input_ids, labels) in enumerate(train_loader):
+                if step < start_step_in_epoch:
+                    continue
                 global_step += 1
                 epoch_steps += 1
-
                 
                 input_ids = input_ids.to(device)
                 labels = labels.to(device)
@@ -194,7 +199,7 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
                     max_learning_rate=config.scheduler.max_learning_rate,
                     min_learning_rate=config.scheduler.min_learning_rate,
                     warmup_iters=config.scheduler.warmup_iters,
-                    cosine_cycle_iters=total_steps,
+                    cosine_cycle_iters=config.scheduler.cosine_cycle_iters,
                 )
                 for param_group in optimizer.param_groups:
                     param_group["lr"] = current_lr
@@ -266,7 +271,7 @@ if __name__ == "__main__":
     # 2. Load checkpoint
     if config.training.use_checkpoint:
         checkpoint = load_checkpoint(config.training.from_checkpoint)
-        console.print(f"Loaded checkpoint from {config.training.from_checkpoint}, iteration: {checkpoint['iteration']}, wandb_id: {checkpoint['wandb_id']}")
+        console.print(f"Loaded checkpoint from {config.training.from_checkpoint}, global_step: {checkpoint['global_step']}, wandb_id: {checkpoint['wandb_id']}")
     else:
         checkpoint = None
     

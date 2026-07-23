@@ -18,6 +18,31 @@ from torch.utils.data import Dataset
 # 复用 SFTDataset 中的预处理逻辑
 import random
 
+# ============================================================
+# 名称替换规则（关键词过滤）
+# 每条数据流入时自动替换，将 MiniMind 相关内容改为自定义名称
+# ============================================================
+NAME_REPLACEMENTS = [
+    ("MiniMind", "MiniSnail"),
+    ("minimind", "minisnail"),
+    ("MINIMIND", "MINISNAIL"),
+    ("jingyaogong", "Lettle"),
+    ("gongjy", "Lettle"),
+]
+
+# 需要替换文本内容的对话字段
+_TEXT_FIELDS = {"content", "reasoning_content", "system"}
+
+
+def apply_name_filter(conversations):
+    """对对话中所有文本字段进行关键词替换。"""
+    for turn in conversations:
+        for field in _TEXT_FIELDS:
+            if field in turn and isinstance(turn[field], str):
+                for old, new in NAME_REPLACEMENTS:
+                    turn[field] = turn[field].replace(old, new)
+    return conversations
+
 
 def extract_tools(conversations):
     """
@@ -151,9 +176,11 @@ def process(jsonl_path, tokenizer, max_length, output_dir, num_samples=None):
     # 逐条处理
     for idx in tqdm(range(total), desc="Tokenizing SFT data"):
         sample = dataset[idx]
+        # 关键词过滤：替换模型名称/作者等（与 MiniMind 解耦）
+        sample["conversations"] = apply_name_filter(sample["conversations"])
         conversation = pre_processing_chat(sample["conversations"])
 
-        # 🛡️ 清洗每一轮：去掉 reasoning_content 等模板不认识的字段
+        # 清洗每一轮：去掉 reasoning_content 等模板不认识的字段
         conversation = [_clean_turn(turn) for turn in conversation]
 
         # ---- 提取 tools 参数 ----
@@ -195,11 +222,11 @@ def process(jsonl_path, tokenizer, max_length, output_dir, num_samples=None):
     np.save(input_path, input_ids_arr)
     np.save(labels_path, labels_arr)
 
-    print(f"✅ 预处理完成")
+    print(f"预处理完成")
     print(f"   input_ids: {input_path} → shape {input_ids_arr.shape}")
     print(f"   labels:    {labels_path} → shape {labels_arr.shape}")
     if tool_call_count > 0:
-        print(f"   📞 工具调用数据: {tool_call_count} 条（已保留 function 字段）")
+        print(f"    工具调用数据: {tool_call_count} 条（已保留 function 字段）")
 
 
 if __name__ == "__main__":

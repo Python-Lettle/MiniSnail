@@ -263,34 +263,29 @@ class SnailModel(nn.Module):
         return X                            # 返回完整序列
 
 
-    def chat(self, message: str, tokenizer, history=None, **kwargs):
-        """
-        SFT 对话生成入口。
-
-        用法：
-            response = model.chat("你好", tokenizer)
-            print(response)
-        """
-        # 1. 构建对话历史
+    def chat(self, message, tokenizer, history=None, **kwargs):
         messages = history or []
         messages.append({"role": "user", "content": message})
 
-        # 2. 用 ChatML 模板 + 添加生成提示
-        input_ids = tokenizer.apply_chat_template(
+        # 手动构造 prompt：用模板渲染对话，但不加 generation_prompt
+        prompt = tokenizer.apply_chat_template(
             messages,
-            tokenize=True,
-            add_generation_prompt=True,   # ← 自动追加 "<|im_start|>assistant\n"
-            return_tensors="pt",
-        )["input_ids"].to(self.config.system.device)   # 或直接 .to(next(self.parameters()).device)
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        # 只加 assistant 标记，不加 <think> 标签
+        prompt += "<|im_start|>assistant\n"
 
-        # 3. 生成
+        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(
+            self.config.system.device
+        )
+
         output_ids = self.generate(
             input_ids,
-            eos_token_id=tokenizer.eos_token_id,  # =2
+            eos_token_id=tokenizer.eos_token_id,
             **kwargs
         )
 
-        # 4. 解码为文本（跳过特殊 token）
         response = tokenizer.decode(
             output_ids[0],
             skip_special_tokens=True,
