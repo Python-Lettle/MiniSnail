@@ -2,12 +2,11 @@ from minisnail.debug import console, DEBUG, LossMonitor
 from minisnail.functions import cross_entropy_loss, cosine_schedule, gradient_clipping
 from minisnail.config import SnailConfig, DEFAULT_CONFIG
 from minisnail.model import init_model
-from minisnail.util import read_memmap_data, data_loader, setup_seed
+from minisnail.dataset import get_dataloader
+from minisnail.util import setup_seed
 import torch
 from typing import IO, BinaryIO
-from tqdm import tqdm
 import numpy as np
-import numpy.typing as npt
 import os
 import time
 import argparse
@@ -16,7 +15,8 @@ import wandb
 def save_checkpoint(
 	model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
-    iteration: int,
+    global_step: int,
+    epoch: int,
     run: wandb.Run,
     out: str | os.PathLike | BinaryIO | IO[bytes],
 ):
@@ -26,8 +26,9 @@ def save_checkpoint(
     Args:
         model (torch.nn.Module): Serialize the state of this model.
         optimizer (torch.optim.Optimizer): Serialize the state of this optimizer.
-        iteration (int): Serialize this value, which represents the number of training iterations
+        global_step (int): Serialize this value, which represents the number of training iterations
             we've completed.
+        epoch (int): Current epoch index.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
     # 1. Prepare the file to save the checkpoint
@@ -39,7 +40,8 @@ def save_checkpoint(
         {
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'iteration': iteration,
+            'global_step': global_step,
+            'epoch': epoch,
             'wandb_id': run.id,
         },
         out
@@ -64,18 +66,9 @@ def load_checkpoint(
     if isinstance(src, str) or isinstance(src, os.PathLike):
         src = open(src, 'rb')
     # Load the model state from the checkpoint
-    checkpoint = torch.load(src)
-    
-    return checkpoint
+    checkpoint = torch.load(src, weights_only=False)
 
-def val_iterator(memmap_arr, batch_size, context_length):
-    N = len(memmap_arr)
-    nb = (N-context_length-1)//batch_size
-    for bi in range(nb):
-        base = bi*batch_size
-        x = np.stack([memmap_arr[i:i+context_length] for i in range(base, base+batch_size)])
-        y = np.stack([memmap_arr[i+1:i+context_length+1] for i in range(base, base+batch_size)])
-        yield torch.tensor(x, dtype=torch.long), torch.tensor(y, dtype=torch.long)
+    return checkpoint
 
 def train_lm(config: SnailConfig = DEFAULT_CONFIG, wandb_run = None, checkpoint = None):
     setup_seed(config.system.seed)
@@ -111,6 +104,7 @@ def train_lm(config: SnailConfig = DEFAULT_CONFIG, wandb_run = None, checkpoint 
     d_ff: int = config.model.d_ff
     rope_theta: float = config.model.rope_theta
     batch_size: int = config.training.batch_size
+    accumulation_steps: int = config.training.accumulation_steps
 
     console.print("vocab_size:", vocab_size)
     console.print("context_length:", context_length)
@@ -120,134 +114,182 @@ def train_lm(config: SnailConfig = DEFAULT_CONFIG, wandb_run = None, checkpoint 
     console.print("d_ff:", d_ff)
     console.print("rope_theta:", rope_theta)
     console.print("batch_size:", batch_size)
+    console.print("accumulation_steps:", accumulation_steps)
+    console.print(f"Mixed precision (AMP): {amp_dtype if use_amp else 'disabled (fp32)'}")
 
-    # 2. Load the datasets
-    train_data_tokens = read_memmap_data(train_data_path)    # 1D array
-    console.print("train_data_tokens shape:", train_data_tokens.shape)
+    # 2. Create dataloaders (torch official DataLoader)
+    train_loader = get_dataloader(
+        train_data_path, block_size=context_length, batch_size=batch_size,
+    )
+    valid_loader = get_dataloader(
+        valid_data_path, block_size=context_length, batch_size=batch_size,
+        shuffle=False, drop_last=False,
+    )
 
-    valid_data_tokens = read_memmap_data(valid_data_path)    # 1D array
-    console.print("valid_data_tokens shape:", valid_data_tokens.shape)
+    steps_per_epoch = len(train_loader)
+    total_steps = steps_per_epoch * epochs
+    console.print(f"数据集大小: {len(train_loader.dataset)} 条, "
+               f"每 epoch {steps_per_epoch} 步, "
+               f"共 {epochs} epoch = {total_steps} 步")
 
     # 3. Create the model and optimizer
-    model = init_model(config, device=device)
+    model = init_model(config, device=device, dtype=model_dtype)
     if config.training.from_weight:
-        model.load_state_dict(torch.load(config.training.from_weight))
+        model.load_state_dict(torch.load(config.training.from_weight, weights_only=False))
         console.print("[yellow]Loading model from weight:", config.training.from_weight)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=betas, eps=1e-8, weight_decay=weight_decay)
 
     # 4. Load checkpoint
     start_epoch = 0
+    global_step = 0
     if checkpoint is not None:
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint['iteration']
-        console.print("Load checkpoint from:", start_epoch)
+        global_step = checkpoint['global_step']
+        start_epoch = global_step // steps_per_epoch if steps_per_epoch > 0 else 0
+        console.print("Load checkpoint from global_step:", global_step)
 
     train_loss_monitor = LossMonitor(title="Train Loss Monitor", show_stats=False)
     valid_loss_monitor = LossMonitor(title="Valid Loss Monitor", show_stats=False)
 
     # 5. Train the model
     console.print("Training start at epoch", start_epoch)
-    for epoch in range(start_epoch, epochs):
-        try:
-            # ----------------------------------------
-            #                  Train
-            # ----------------------------------------
-            model.train()
-            inputs, targets = data_loader(train_data_tokens, batch_size=batch_size, context_length=context_length, device=device)
+    has_pending_grads = False
+    min_loss = float('inf')
+    model.train()
+    try:
+        for epoch in range(start_epoch, epochs):
+            console.print(f"\n{'='*40}")
+            console.print(f"Epoch [{epoch + 1}/{epochs}]")
+            console.print(f"{'='*40}")
 
-            logits = model(inputs)
-            loss = cross_entropy_loss(logits, targets)
+            epoch_loss = 0.0
+            epoch_steps = 0
+            epoch_start = time.time()
 
-            optimizer.zero_grad()
-            loss.backward()
+            for step, (inputs, targets) in enumerate(train_loader):
+                inputs, targets = inputs.to(device), targets.to(device)
+                global_step += 1
+                epoch_steps += 1
 
-            # Gradient clipping and learning rate scheduling
-            gradient_clipping(model.parameters(), config.training.gradient_clip)
+                with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+                    logits = model(inputs)
+                    loss = cross_entropy_loss(logits, targets)
 
-            # Learning rate scheduling
-            current_lr = cosine_schedule(
-                epoch,
-                max_learning_rate=config.scheduler.max_learning_rate,
-                min_learning_rate=config.scheduler.min_learning_rate,
-                warmup_iters=config.scheduler.warmup_iters,
-                cosine_cycle_iters=config.scheduler.cosine_cycle_iters,
+                # Gradient accumulation: scale loss so gradients average correctly
+                scaled_loss = loss / accumulation_steps
+                scaled_loss.backward()
+                has_pending_grads = True
+
+                # Learning rate scheduling (computed every iteration for logging)
+                current_lr = cosine_schedule(
+                    global_step,
+                    max_learning_rate=config.scheduler.max_learning_rate,
+                    min_learning_rate=config.scheduler.min_learning_rate,
+                    warmup_iters=config.scheduler.warmup_iters,
+                    cosine_cycle_iters=config.scheduler.cosine_cycle_iters,
+                )
+
+                # Perform optimizer step every accumulation_steps iterations
+                if global_step % accumulation_steps == 0:
+                    # Gradient clipping
+                    gradient_clipping(model.parameters(), config.training.gradient_clip)
+
+                    # Update learning rate
+                    for param_group in optimizer.param_groups:
+                        param_group["lr"] = current_lr
+
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    has_pending_grads = False
+
+                epoch_loss += loss.item()
+                train_loss_monitor.add_loss(global_step, loss.item())
+
+                # Wandb logging
+                if wandb_run is not None:
+                    wandb_run.log({
+                        "train/loss": loss.item(),
+                        "train/lr": current_lr,
+                    }, step=global_step)
+
+                # Print information
+                if global_step % config.training.print_interval == 0:
+                    console.print(f"Epoch [{epoch + 1}/{epochs}]")
+                    console.print(f"Step {global_step}/{total_steps}")
+                    console.print(f"Loss: {loss.item():.4f}")
+                    console.print(f"{config.training.print_interval} Steps completed")
+                    console.print("="*50)
+
+                # ----------------------------------------
+                #                Validate
+                # ----------------------------------------
+                if global_step % valid_interval == 0:
+                    model.eval()
+                    with torch.no_grad():
+                        val_losses = []
+                        count = 0
+                        for inputs_val, targets_val in valid_loader:
+                            inputs_val, targets_val = inputs_val.to(device), targets_val.to(device)
+                            val_logits = model(inputs_val)
+                            val_loss = cross_entropy_loss(val_logits, targets_val)
+                            val_losses.append(val_loss.item())
+                            count += 1
+                            if count >= 10:
+                                break
+                        val_loss_mean = np.mean(val_losses)
+                        is_min_loss = valid_loss_monitor.add_loss(global_step, val_loss_mean)
+                        console.print(f"VALID mean loss: {val_loss_mean:.4f}")
+
+                        # Wandb logging
+                        if wandb_run is not None:
+                            wandb_run.log({
+                                "valid/loss": val_loss_mean,
+                            }, step=global_step)
+                        if is_min_loss:
+                            torch.save(model.state_dict(), os.path.join(save_model_dir, "model_best.pt"))
+                    model.train()
+
+            # Epoch end
+            avg_epoch_loss = epoch_loss / max(epoch_steps, 1)
+            epoch_time = (time.time() - epoch_start) / 60
+            console.print(
+                f"Epoch [{epoch + 1}/{epochs}] completed | "
+                f"Average Loss: {avg_epoch_loss:.4f} | "
+                f"Time: {epoch_time:.1f} min"
             )
-            for param_group in optimizer.param_groups:
-                param_group["lr"] = current_lr
 
-            optimizer.step()
-            train_loss_monitor.add_loss(epoch, loss.item())
+    except AssertionError as e:
+        console.print(f"AssertionError at global_step {global_step} / {total_steps}: {e}")
+        console.print(f"Max token ID: {inputs.max()}")
+        console.print(f"Max token ID: {targets.max()}")
+        save_checkpoint(model, optimizer, global_step, epoch, wandb_run, os.path.join(save_model_dir, "checkpoint.pt"))
+        console.print(f"Checkpoint saved at global_step {global_step} / {total_steps}")
+        console.print("="*50)
+        return
+    except KeyboardInterrupt:
+        console.print(f"KeyboardInterrupt at global_step {global_step} / {total_steps}")
+        save_checkpoint(model, optimizer, global_step, epoch, wandb_run, os.path.join(save_model_dir, "checkpoint.pt"))
+        console.print(f"Checkpoint saved at global_step {global_step} / {total_steps}")
+        console.print("="*50)
+        return
+    except Exception as e:
+        console.print(f"Error at global_step {global_step} / {total_steps}: {e}")
+        save_checkpoint(model, optimizer, global_step, epoch, wandb_run, os.path.join(save_model_dir, "checkpoint.pt"))
+        console.print(f"Checkpoint saved at global_step {global_step} / {total_steps}")
+        console.print("="*50)
+        return
 
-            # Wandb logging
-            if wandb_run is not None:
-                wandb_run.log({
-                    "train/loss": loss.item(),
-                    "train/lr": current_lr,
-                }, step=epoch)
+    # Apply remaining accumulated gradients from the last partial accumulation cycle
+    if has_pending_grads:
+        gradient_clipping(model.parameters(), config.training.gradient_clip)
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = current_lr
+        optimizer.step()
+        optimizer.zero_grad()
+        console.print("Applied final optimizer step for remaining accumulated gradients")
 
-            # Print information
-            if epoch % config.training.print_interval == 0:
-                console.print(f"Epoch {epoch+1}/{epochs}")
-                console.print(f"Loss: {loss.item():.4f}")
-                console.print("Epoch completed")
-                console.print("="*50)
-            
-            # ----------------------------------------
-            #                Validate
-            # ----------------------------------------
-            if epoch % valid_interval == 0:
-                model.eval()
-                with torch.no_grad():
-                    val_losses = []
-                    count = 0
-                    for inputs_val, targets_val in val_iterator(valid_data_tokens, batch_size, context_length):
-                        inputs_val, targets_val = inputs_val.to(device), targets_val.to(device)
-                        val_logits = model(inputs_val)
-                        val_loss = cross_entropy_loss(val_logits, targets_val)
-                        # Collect val_loss
-                        val_losses.append(val_loss.item())
-                        count += 1
-                        if count >= 10:
-                            break
-                    val_loss_mean = np.mean(val_losses)
-                    is_min_loss = valid_loss_monitor.add_loss(epoch, val_loss_mean)
-                    console.print(f"VALID mean loss: {val_loss_mean:.4f}")
-                    
-                    # Wandb logging
-                    if wandb_run is not None:
-                        wandb_run.log({
-                            "valid/loss": val_loss_mean,
-                        }, step=epoch)
-                    if is_min_loss:
-                        torch.save(model.state_dict(), os.path.join(save_model_dir, "model_best.pt"))
-
-
-        except AssertionError as e:
-            console.print(f"AssertionError in epoch {epoch+1}: {e}")
-            console.print(f"Max token ID: {inputs.max()}")
-            console.print(f"Max token ID: {targets.max()}")
-            # Save checkpoint
-            save_checkpoint(model, optimizer, epoch, run, os.path.join(save_model_dir, "checkpoint.pt"))
-            console.print(f"Checkpoint saved at epoch {epoch+1}")
-            console.print("="*50)
-            return
-        except KeyboardInterrupt:
-            console.print(f"KeyboardInterrupt in epoch {epoch+1}")
-            # Save checkpoint
-            save_checkpoint(model, optimizer, epoch, run, os.path.join(save_model_dir, "checkpoint.pt"))
-            console.print(f"Checkpoint saved at epoch {epoch+1}")
-            console.print("="*50)
-            return
-        except Exception as e:
-            console.print(f"Error in epoch {epoch+1}: {e}")
-            # Save checkpoint
-            save_checkpoint(model, optimizer, epoch, run, os.path.join(save_model_dir, "checkpoint.pt"))
-            console.print(f"Checkpoint saved at epoch {epoch+1}")
-            console.print("="*50)
-            return
-    
     # 6. Save model
     final_path = os.path.join(save_model_dir, "model_new.pt")
     torch.save(model.state_dict(), final_path)
@@ -276,7 +318,7 @@ if __name__ == "__main__":
     # 2. Load checkpoint
     if config.training.use_checkpoint:
         checkpoint = load_checkpoint(config.training.from_checkpoint)
-        console.print(f"Loaded checkpoint from {config.training.from_checkpoint}, iteration: {checkpoint['iteration']}, wandb_id: {checkpoint['wandb_id']}")
+        console.print(f"Loaded checkpoint from {config.training.from_checkpoint}, global_step: {checkpoint['global_step']}, wandb_id: {checkpoint['wandb_id']}")
     else:
         checkpoint = None
     

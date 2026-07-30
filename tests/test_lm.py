@@ -1,8 +1,7 @@
 import os
 import torch
 from typing import IO, BinaryIO
-from transformers import BatchEncoding
-from transformers.tokenization_utils_tokenizers import TokenizersBackend
+from transformers import BatchEncoding, PreTrainedTokenizer
 from minisnail.config import SnailConfig
 from minisnail.model import init_model, SnailModel
 from minisnail.tokenizer import get_tokenizer
@@ -26,13 +25,13 @@ def load_checkpoint(
     if isinstance(src, str) or isinstance(src, os.PathLike):
         src = open(src, 'rb')
     # Load the model state from the checkpoint
-    checkpoint = torch.load(src)
+    checkpoint = torch.load(src, weights_only=False)
     
     return checkpoint
 
 if __name__ == '__main__':
     config = SnailConfig.from_json("./config.json")
-    tokenizer: TokenizersBackend = get_tokenizer(config)
+    tokenizer: PreTrainedTokenizer = get_tokenizer(config)
     # The model will load the weight from config.training.from_weight
     model: SnailModel = init_model(config)
 
@@ -40,7 +39,7 @@ if __name__ == '__main__':
     # checkpoint = load_checkpoint("./output/checkpoint.pt")
     # model.load_state_dict(checkpoint["model_state_dict"])
 
-    model.load_state_dict(torch.load("./output/sft_64500.pt"))
+    model.load_state_dict(torch.load("./output/sft_64500.pt", weights_only=False))
     console.print("[yellow]Loading model from weight:", "./output/sft_64500.pt")
     
     model.eval()

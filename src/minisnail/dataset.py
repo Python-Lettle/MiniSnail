@@ -4,26 +4,29 @@ import random
 import numpy as np
 from datasets import load_dataset
 from torch.utils.data import Dataset, DataLoader
+from minisnail.debug import console
 
 def get_dataloader(
     data_path: str,
     block_size: int = 128,
     batch_size: int = 32,
     num_workers: int | None = None,
+    shuffle: bool = True,
+    drop_last: bool = True,
 ):
     if num_workers is None:
         num_workers = max(1, (os.cpu_count() or 4) // 2)
-    
+
     dataset = PretrainDataset(data_path, block_size)
-    console.print(f"[DataLoader] num_samples: {len(dataset)}, num_workers={num_workers}")
-    
+    console.print(f"[DataLoader] num_samples: {len(dataset)}, num_workers={num_workers}, shuffle={shuffle}, drop_last={drop_last}")
+
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=True,
+        drop_last=drop_last,
         persistent_workers=num_workers > 0,
         prefetch_factor=4 if num_workers > 0 else None,
     )
@@ -58,23 +61,19 @@ class PretrainDataset(Dataset):
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Return a sample pair (x, y) based on the index.
-        Note: Although the index is passed in here, we actually use a random sampling strategy,
-            Consistent with the behavior of np.random.randint in your data-loader function.
-            This "random sampling" method is very common in pre-training.
+        以 index 为起点取连续 block_size+1 个 token，保证一个 epoch 内
+        每个位置恰好被访问一次（由 DataLoader 的 shuffle 负责打乱顺序）。
         """
-        # Randomly select a starting position (the same as np. random. randint in data-loader)
-        start = np.random.randint(0, self.num_samples)
-        
-        # Take consecutive block_size+1 token
-        chunk = self.data[start:start + self.block_size + 1]
-        
+        # Take consecutive block_size+1 token starting from index
+        chunk = self.data[index:index + self.block_size + 1]
+
         # Convert to numpy array (because memmap slices return subviews)
         chunk = np.asarray(chunk, dtype=np.int64)
-        
+
         # Construct x (input) and y (label, offset one bit to the right)
         x = torch.from_numpy(chunk[:-1].copy()).long()  # [block_size]
         y = torch.from_numpy(chunk[1:].copy()).long()   # [block_size]
-        
+
         return x, y
 
 class JSONLDataset(Dataset):

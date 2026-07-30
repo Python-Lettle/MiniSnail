@@ -73,8 +73,8 @@ def load_checkpoint(
     if isinstance(src, str) or isinstance(src, os.PathLike):
         src = open(src, 'rb')
     # Load the model state from the checkpoint
-    checkpoint = torch.load(src)
-    
+    checkpoint = torch.load(src, weights_only=False)
+
     return checkpoint
 
 
@@ -87,10 +87,14 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
     os.makedirs(save_model_dir, exist_ok=True)
 
     device = torch.device(config.system.device)
+    model_dtype, amp_dtype = config.get_torch_dtype()
+    use_amp = amp_dtype is not None
     epochs: int = config.training.epochs
     lr: float = config.training.lr
     betas: tuple[float, float] = config.training.betas
     weight_decay: float = config.training.weight_decay
+
+    console.print(f"Mixed precision (AMP): {amp_dtype if use_amp else 'disabled (fp32)'}")
     
     console.print("Input ids path:", input_ids_path)
     console.print("Labels path:", labels_path)
@@ -109,6 +113,7 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
     d_ff: int = config.model.d_ff
     rope_theta: float = config.model.rope_theta
     batch_size: int = config.training.batch_size
+    accumulation_steps: int = config.training.accumulation_steps
 
     console.print("vocab_size:", vocab_size)
     console.print("context_length:", context_length)
@@ -118,6 +123,7 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
     console.print("d_ff:", d_ff)
     console.print("rope_theta:", rope_theta)
     console.print("batch_size:", batch_size)
+    console.print("accumulation_steps:", accumulation_steps)
 
     # 2. Load datasets
     train_data = SFTDataset(input_ids_path, labels_path)
@@ -135,9 +141,9 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
                f"共 {epochs} epoch = {total_steps} 步")
 
     # 3. Create the model and optimizer
-    model = init_model(config, device=device)
+    model = init_model(config, device=device, dtype=model_dtype)
     if config.training.from_weight:
-        model.load_state_dict(torch.load(config.training.from_weight))
+        model.load_state_dict(torch.load(config.training.from_weight, weights_only=False))
         console.print("[yellow]Loading model from weight:", config.training.from_weight)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=betas, eps=1e-8, weight_decay=weight_decay)
 
@@ -159,6 +165,7 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
     steps_per_epoch = len(train_loader)
     start_epoch = global_step // steps_per_epoch          # 从哪个 epoch 开始
     start_step_in_epoch = global_step % steps_per_epoch   # 该 epoch 内跳过前几步
+    has_pending_grads = False
     try:
         for epoch in range(start_epoch, epochs):
             console.print(f"\n{'='*40}")
@@ -179,21 +186,22 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
                 labels = labels.to(device)
 
                 # console.print(f"Step {global_step}/{total_steps}")
-                logits = model(input_ids)
-                loss = F.cross_entropy(
-                    logits[:, :-1, :].contiguous().view(-1, vocab_size),
-                    labels[:, 1:].contiguous().view(-1),
-                    ignore_index=-100
-                )
+                with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+                    logits = model(input_ids)
+                    loss = F.cross_entropy(
+                        logits[:, :-1, :].contiguous().view(-1, vocab_size),
+                        labels[:, 1:].contiguous().view(-1),
+                        ignore_index=-100
+                    )
                 epoch_loss += loss.item()
                 # console.print(f"Loss: {loss.item():.4f}")
 
-                optimizer.zero_grad()
-                loss.backward()
+                # Gradient accumulation: scale loss so gradients average correctly
+                scaled_loss = loss / accumulation_steps
+                scaled_loss.backward()
+                has_pending_grads = True
 
-                gradient_clipping(model.parameters(), config.training.gradient_clip)
-
-                # Learning rate scheduler
+                # Learning rate scheduler (computed every step for logging)
                 current_lr = cosine_schedule(
                     global_step,
                     max_learning_rate=config.scheduler.max_learning_rate,
@@ -201,10 +209,18 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
                     warmup_iters=config.scheduler.warmup_iters,
                     cosine_cycle_iters=config.scheduler.cosine_cycle_iters,
                 )
-                for param_group in optimizer.param_groups:
-                    param_group["lr"] = current_lr
-                
-                optimizer.step()
+
+                # Perform optimizer step every accumulation_steps
+                if global_step % accumulation_steps == 0:
+                    gradient_clipping(model.parameters(), config.training.gradient_clip)
+
+                    for param_group in optimizer.param_groups:
+                        param_group["lr"] = current_lr
+
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    has_pending_grads = False
+
                 train_loss_monitor.add_loss(global_step, loss.item())
 
                 # Wandb logging
@@ -242,6 +258,15 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
         console.print(f"Checkpoint saved at epoch {epoch+1}, global_step {global_step}")
         console.print("="*50)
         return
+
+    # Apply remaining accumulated gradients from the last partial accumulation cycle
+    if has_pending_grads:
+        gradient_clipping(model.parameters(), config.training.gradient_clip)
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = current_lr
+        optimizer.step()
+        optimizer.zero_grad()
+        console.print("Applied final optimizer step for remaining accumulated gradients")
 
     # 6. Save final model
     final_path = os.path.join(save_model_dir, "sft_new.pt")

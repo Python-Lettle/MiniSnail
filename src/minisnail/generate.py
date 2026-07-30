@@ -1,11 +1,11 @@
 import torch
 import time
-from transformers.tokenization_utils_tokenizers import TokenizersBackend
+from transformers import PreTrainedTokenizer
 from minisnail.model import SnailModel
 from minisnail.config import SnailConfig
 from minisnail.util import console
 
-def generate_text(model: SnailModel, tokenizer: TokenizersBackend, prompt: str, config: SnailConfig = None, device: torch.device = None):
+def generate_text(model: SnailModel, tokenizer: PreTrainedTokenizer, prompt: str, config: SnailConfig = None, device: torch.device = None):
     '''Generate text output by the model.
     '''
     device = torch.device(config.system.device) if device is None else device
@@ -18,18 +18,18 @@ def generate_text(model: SnailModel, tokenizer: TokenizersBackend, prompt: str, 
 
     start_time = time.time()
     with torch.no_grad():
-        logits = model.generate(
+        output_ids_tensor = model.generate(
             prompt_tensor,
             max_tokens=config.generation.max_tokens,
             temperature=config.generation.temperature,
             top_k=config.generation.top_k,
             eos_token_id=config.tokenizer.eos_token_id,
         )
-        
-        console.print("Logits:")
-        console.print(logits)
 
-        output_ids: list[int] = logits[0].cpu().numpy().tolist()
+        console.print("Output token ids:")
+        console.print(output_ids_tensor)
+
+        output_ids: list[int] = output_ids_tensor[0].cpu().numpy().tolist()
 
         # ==== Merge the original prompt and the generated content ====
         full_ids = prompt_ids + output_ids

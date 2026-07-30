@@ -61,16 +61,11 @@ def cross_entropy_loss(logits: Float[Tensor, " batch_size vocab_size"], targets:
     # 2. Compute log_softmax: log(exp(shifted_logits) / sum(exp(shifted_logits)))
     log_softmax = shifted_logits - log_sum_exp
     
-    # 2. Extract log probabilities of the target classes
-    # Use gather to collect values at target positions from log_softmax
-    # targets need to be reshaped to match gather operation (collecting along last dim)
-    targets_reshaped = targets.unsqueeze(-1)  # Shape from [batch, seq] to [batch, seq, 1]
-    
     # 2. Extract log-probabilities of target classes
     # Use gather to collect values at target positions from log_softmax
     # targets need to be reshaped to match gather operation (collecting along last dim)
     targets_reshaped = targets.unsqueeze(-1)  # Shape from [batch, seq] to [batch, seq, 1]
-    
+
     # Collect target values along last dim (class dim)
     target_log_probs = torch.gather(log_softmax, dim=-1, index=targets_reshaped)
     target_log_probs = target_log_probs.squeeze(-1)  # Remove last dim

@@ -226,3 +226,7 @@ wandb
 *.pt
 train_loss_curve.png
 valid_loss_curve.png
+
+*.jsonl
+
+output/

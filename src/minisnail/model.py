@@ -14,7 +14,7 @@ def init_model(config: SnailConfig, device=None, dtype=None):
     It is optional to load the model from a certain weight file.
     '''
     model = SnailModel(config, device=device, dtype=dtype)
-    return model.to(device)
+    return model
 
 class PWFFN(nn.Module):
     '''
@@ -242,7 +242,7 @@ class SnailModel(nn.Module):
                         next_token_logits[:, token_id] /= repetition_penalty
                 if top_k:
                     topk_values, _ = torch.topk(next_token_logits, min(top_k, next_token_logits.size(-1)))
-                    threshold = topk_values[:, -1]
+                    threshold = topk_values[:, -1].unsqueeze(-1)
                     next_token_logits = next_token_logits.masked_fill(
                         next_token_logits < threshold, float("-inf")
                     )

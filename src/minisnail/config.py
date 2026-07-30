@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List
 import json
 import os
+import torch
 
 @dataclass
 class TokenizerConfig:
@@ -34,7 +35,7 @@ class TrainingConfig:
     weight_decay: float = 0.001
     valid_interval: int = 400
     gradient_clip: float = 1.0
-    accumulation_steps: int = 1                 # TODO
+    accumulation_steps: int = 1
     print_interval: int = 200
     from_weight: Optional[str] | None = None
     use_checkpoint: bool = False
@@ -65,6 +66,7 @@ class SystemConfig:
     """System configuration"""
     device: str = "cuda"
     seed: int = 42
+    dtype: str = "float32"  # "float32" | "bfloat16" | "float16"
 
 @dataclass
 class GenerationConfig:
