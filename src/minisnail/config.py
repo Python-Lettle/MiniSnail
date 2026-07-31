@@ -76,6 +76,7 @@ class GenerationConfig:
     temperature: float = 0.8
     top_k: int = 40
     device: str = "cuda"
+    repetition_penalty: float = 1.2
 
 @dataclass
 class WandbConfig:
@@ -95,7 +96,16 @@ class SnailConfig:
     system: SystemConfig = field(default_factory=SystemConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
-    
+
+    def get_torch_dtype(self):
+        """Get torch.dtype from system.dtype string. Returns (model_dtype, amp_dtype)."""
+        dtype_map = {
+            "float32": (torch.float32, None),
+            "bfloat16": (torch.bfloat16, torch.bfloat16),
+            "float16": (torch.float16, torch.float16),
+        }
+        return dtype_map.get(self.system.dtype, (torch.float32, None))
+
     @classmethod
     def from_dict(cls, config_dict: dict) -> "SnailConfig":
         """Create configuration from dictionary"""

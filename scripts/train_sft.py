@@ -156,11 +156,13 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
         console.print("Load checkpoint from:", start_epoch)
 
     train_loss_monitor = LossMonitor(title="Train Loss Monitor", show_stats=False)
+    valid_loss_monitor = LossMonitor(title="Valid Loss Monitor", show_stats=False)
 
     # 5. Train the model
     console.print("Training start at epoch", start_epoch)
     global_step = checkpoint['global_step'] if checkpoint is not None else 0
     min_loss = float('inf')
+    current_lr = lr  # 初始化，避免 except 块未定义
 
     steps_per_epoch = len(train_loader)
     start_epoch = global_step // steps_per_epoch          # 从哪个 epoch 开始
@@ -235,13 +237,43 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
                     console.print(f"Epoch [{epoch + 1}/{epochs}]")
                     console.print(f"Step {global_step}/{total_steps}")
                     console.print(f"Loss: {loss.item():.4f}")
-                    console.print(f"{config.training.print_interval} Steps completed")
+                    console.print(f"LR: {current_lr:.2e}")
                     console.print("="*50)
 
-                    # Save checkpoint
-                    if loss.item() < min_loss:
-                        min_loss = loss.item()
-                        torch.save(model.state_dict(), os.path.join(save_model_dir, "sft_best.pt"))
+                # ----------------------------------------
+                #                Validate
+                # ----------------------------------------
+                if global_step % config.training.valid_interval == 0:
+                    model.eval()
+                    with torch.no_grad():
+                        val_losses = []
+                        # 随机采样 20 个样本做验证
+                        valid_indices = random.sample(range(len(train_data)), min(20, len(train_data)))
+                        for vi in valid_indices:
+                            input_ids_v, labels_v = train_data[vi]
+                            input_ids_v = input_ids_v.unsqueeze(0).to(device)
+                            labels_v = labels_v.unsqueeze(0).to(device)
+                            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+                                val_logits = model(input_ids_v)
+                            val_loss = F.cross_entropy(
+                                val_logits[:, :-1, :].contiguous().view(-1, vocab_size),
+                                labels_v[:, 1:].contiguous().view(-1),
+                                ignore_index=-100
+                            )
+                            val_losses.append(val_loss.item())
+                        val_loss_mean = np.mean(val_losses)
+                        is_min_loss = valid_loss_monitor.add_loss(global_step, val_loss_mean)
+                        console.print(f"VALID mean loss: {val_loss_mean:.4f}")
+
+                        # Wandb logging
+                        if run is not None:
+                            run.log({"valid/loss": val_loss_mean}, step=global_step)
+
+                        # Save best model
+                        if is_min_loss:
+                            torch.save(model.state_dict(), os.path.join(save_model_dir, "sft_best.pt"))
+                            console.print(f"[green]New best model saved (valid loss: {val_loss_mean:.4f})")
+                    model.train()
 
             # Epoch end
             avg_epoch_loss = epoch_loss / max(epoch_steps, 1)
@@ -276,6 +308,7 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
 
     # 7. Loss curve
     train_loss_monitor.finalize(save_path=os.path.join(save_model_dir, "train_loss_curve.png"))
+    valid_loss_monitor.finalize(save_path=os.path.join(save_model_dir, "valid_loss_curve.png"))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MiniSnail SFT")

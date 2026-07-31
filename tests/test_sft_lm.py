@@ -49,11 +49,14 @@ if __name__ == '__main__':
     model.eval()
     model.to(device=torch.device(config.system.device))
     
-    prompt: str = "我开发了一款小型语言模型，但是它的重复率太高"
+    prompt: str = "你最近有没有看过什么有趣的电影？"
 
-    # Pre-Training Test
-    generate_text(model, tokenizer, prompt, config, device=torch.device(config.system.device))
-
+    # SFT Test
+    response = model.chat(prompt, tokenizer, repetition_penalty=1.2, top_k=40, max_tokens=512)
+    console.print("Prompt:")
+    console.print(prompt)
+    console.print("Response:")
+    console.print(response)
     
     
        

@@ -42,19 +42,23 @@ class PWFFN(nn.Module):
         return FFNx
         
 class RotaryPositionalEmbedding(nn.Module):
-    def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None):
+    def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None, dtype=None):
         '''
             Build RoPE module
             theta: float,       RoPE's theta value
             d_k: int,           query and key dimension
             max_seq_len: int,   Input sequence length
             device: torch.device | None = None Device to store the buffer on
+            dtype: torch.dtype | None = None Data type for the angle cache
         '''
         super().__init__()
-        
+
+        angle_cache = RotaryPositionalEmbedding.init_cache(max_seq_len, d_k, theta)
+        if device is not None or dtype is not None:
+            angle_cache = angle_cache.to(device=device, dtype=dtype)
         self.register_buffer(
             "angle_cache",
-            RotaryPositionalEmbedding.init_cache(max_seq_len, d_k, theta), persistent=False
+            angle_cache, persistent=False
         )
 
     @staticmethod
@@ -190,7 +194,7 @@ class SnailModel(nn.Module):
 
         # 2. Rotary Positional Embedding Layer for Transformer Blocks
         self.d_k = config.model.d_model // config.model.num_heads
-        self.rope = RotaryPositionalEmbedding(config.model.rope_theta, self.d_k, config.model.context_length, device=device)
+        self.rope = RotaryPositionalEmbedding(config.model.rope_theta, self.d_k, config.model.context_length, device=device, dtype=dtype)
 
         # 3. SnailModel Blocks
         self.blocks = nn.ModuleList([SnailBlock(config, rope_embedding=self.rope, device=device, dtype=dtype) for _ in range(config.model.num_layers)])

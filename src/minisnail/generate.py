@@ -24,6 +24,7 @@ def generate_text(model: SnailModel, tokenizer: PreTrainedTokenizer, prompt: str
             temperature=config.generation.temperature,
             top_k=config.generation.top_k,
             eos_token_id=config.tokenizer.eos_token_id,
+            repetition_penalty=config.generation.repetition_penalty,
         )
 
         console.print("Output token ids:")

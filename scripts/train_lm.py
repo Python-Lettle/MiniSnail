@@ -9,6 +9,7 @@ from typing import IO, BinaryIO
 import numpy as np
 import os
 import time
+import random
 import argparse
 import wandb
 
@@ -80,6 +81,8 @@ def train_lm(config: SnailConfig = DEFAULT_CONFIG, wandb_run = None, checkpoint 
     os.makedirs(save_model_dir, exist_ok=True)
     
     device = torch.device(config.system.device)
+    model_dtype, amp_dtype = config.get_torch_dtype()
+    use_amp = amp_dtype is not None
     epochs: int = config.training.epochs
     valid_interval: int = config.training.valid_interval
     lr: float = config.training.lr
@@ -229,15 +232,15 @@ def train_lm(config: SnailConfig = DEFAULT_CONFIG, wandb_run = None, checkpoint 
                     model.eval()
                     with torch.no_grad():
                         val_losses = []
-                        count = 0
-                        for inputs_val, targets_val in valid_loader:
-                            inputs_val, targets_val = inputs_val.to(device), targets_val.to(device)
-                            val_logits = model(inputs_val)
+                        # 随机采样 valid batches，避免固定取数据集开头造成的偏置
+                        valid_indices = random.sample(range(len(valid_loader)), min(20, len(valid_loader)))
+                        for vi in valid_indices:
+                            inputs_val, targets_val = valid_loader.dataset[vi]
+                            inputs_val, targets_val = inputs_val.unsqueeze(0).to(device), targets_val.unsqueeze(0).to(device)
+                            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+                                val_logits = model(inputs_val)
                             val_loss = cross_entropy_loss(val_logits, targets_val)
                             val_losses.append(val_loss.item())
-                            count += 1
-                            if count >= 10:
-                                break
                         val_loss_mean = np.mean(val_losses)
                         is_min_loss = valid_loss_monitor.add_loss(global_step, val_loss_mean)
                         console.print(f"VALID mean loss: {val_loss_mean:.4f}")

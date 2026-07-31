@@ -2,7 +2,6 @@ import os
 import torch
 import random
 import numpy as np
-from datasets import load_dataset
 from torch.utils.data import Dataset, DataLoader
 from minisnail.debug import console
 
@@ -52,20 +51,22 @@ class PretrainDataset(Dataset):
         # Loading in mmap mode will not read the entire file into memory
         self.data = np.memmap(data_path, dtype=np.int32, mode='r')
         
-        # Calculate the number of available samples (each sample requires block_size+1 token)
-        self.num_samples = len(self.data) - block_size
-    
+        # Calculate the number of available samples (non-overlapping chunks)
+        # Each sample consists of block_size + 1 tokens, and the samples do not overlap with each other.
+        self.num_samples = len(self.data) // (block_size + 1)
+
     def __len__(self) -> int:
         return self.num_samples
-    
+
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Return a sample pair (x, y) based on the index.
-        以 index 为起点取连续 block_size+1 个 token，保证一个 epoch 内
-        每个位置恰好被访问一次（由 DataLoader 的 shuffle 负责打乱顺序）。
+        Take the index-th non-overlapping block as the index-th block, and select consecutive block_size + 1 tokens.
+        During each epoch, each token is accessed exactly once. The shuffling function of DataLoader is responsible for randomizing the order.
         """
-        # Take consecutive block_size+1 token starting from index
-        chunk = self.data[index:index + self.block_size + 1]
+        # The starting position of the index-th non-overlapping block
+        start = index * (self.block_size + 1)
+        chunk = self.data[start:start + self.block_size + 1]
 
         # Convert to numpy array (because memmap slices return subviews)
         chunk = np.asarray(chunk, dtype=np.int64)
@@ -75,26 +76,6 @@ class PretrainDataset(Dataset):
         y = torch.from_numpy(chunk[1:].copy()).long()   # [block_size]
 
         return x, y
-
-class JSONLDataset(Dataset):
-    def __init__(self, data_path, tokenizer, max_length=512):
-        super().__init__()
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.samples = load_dataset('json', data_files=data_path, split='train')
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, index):
-        sample = self.samples[index]
-        tokens = self.tokenizer(str(sample['text']), add_special_tokens=False, max_length=self.max_length - 2, truncation=True).input_ids
-        tokens = [self.tokenizer.bos_token_id] + tokens + [self.tokenizer.eos_token_id]
-        input_ids = tokens + [self.tokenizer.pad_token_id] * (self.max_length - len(tokens))
-        input_ids = torch.tensor(input_ids, dtype=torch.long)
-        labels = input_ids.clone()
-        labels[input_ids == self.tokenizer.pad_token_id] = -100
-        return input_ids, labels
 
 # ---------- SFTDataset ----------
 
