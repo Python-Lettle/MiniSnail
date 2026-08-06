@@ -77,6 +77,12 @@ def main():
     print(f"Workers: {args.num_workers} | Chunk size: {args.chunk_size}")
     t0 = time.time()
 
+    # 判断训练集文件是否已存在
+    train_exists = os.path.isfile(args.train_output_path)
+    if train_exists:
+        print(f"\n[Skip] 检测到训练集文件已存在: {args.train_output_path}")
+        print("将跳过训练集数据的编码，直接定位至验证集制作部分。\n")
+
     # ============================================================================
     # 第一遍扫描：统计总字节数，用于确定训练/验证集的临界分界点
     # ============================================================================
@@ -94,7 +100,12 @@ def main():
     print(f"Total lines: {total_lines:,}  Total bytes: {total_bytes:,}")
     print(f"Train target (bytes): {train_bytes_target:,.0f}  ({args.train_ratio*100:.0f}%)")
 
-    train_f = open(args.train_output_path, "wb")
+    # 只有当训练集不存在时才打开训练集写入流
+    if not train_exists:
+        train_f = open(args.train_output_path, "wb")
+    else:
+        train_f = None
+        
     valid_f = open(args.valid_output_path, "wb")
     train_tok = 0
     valid_tok = 0
@@ -131,13 +142,15 @@ def main():
 
                 if not switched:
                     # === 训练集：整行完整加入，不拆分 ===
-                    buf_train.append(line)
+                    if not train_exists:  # 如果训练集已存在，跳过数据缓冲以节省内存和时间
+                        buf_train.append(line)
+                        if len(buf_train) >= args.chunk_size:
+                            yield ("train", cid, buf_train)
+                            cid += 1
+                            buf_train = []
+
                     accumulated_bytes += line_bytes
                     train_lines_count += 1
-                    if len(buf_train) >= args.chunk_size:
-                        yield ("train", cid, buf_train)
-                        cid += 1
-                        buf_train = []
 
                     # 检查是否达到临界点
                     # 注意：当前行已完整加入 buf_train，after this point 切换
@@ -150,7 +163,6 @@ def main():
                         print(f"    Train lines : {train_lines_count:,}")
                         print(f"    Overshoot   : +{accumulated_bytes - train_bytes_target:,} bytes "
                               f"(+{(actual_ratio - args.train_ratio)*100:.2f}%)")
-                        print(f"    (原因是最后一行文档完整加入后超过了目标值，保证了训练集文档完整性)\n")
                 else:
                     # === 验证集 ===
                     buf_valid.append(line)
@@ -182,22 +194,29 @@ def main():
             desc="Encoding",
         ):
             if split_tag == "train":
-                arr.tofile(train_f)
-                train_tok += arr.shape[0]
+                if train_f is not None:
+                    arr.tofile(train_f)
+                    train_tok += arr.shape[0]
             else:
                 arr.tofile(valid_f)
                 valid_tok += arr.shape[0]
 
-    train_f.close()
+    if train_f is not None:
+        train_f.close()
     valid_f.close()
     gc.collect()
 
     elapsed = time.time() - t0
     total_tok = train_tok + valid_tok
     print(f"\n{'=' * 60}")
-    print(f"Train tokens : {train_tok:,}  ({train_tok*4/1024/1024:.2f} MB) -> {args.train_output_path}")
+    if train_exists:
+        print(f"Train tokens : [Skipped] -> {args.train_output_path}")
+    else:
+        print(f"Train tokens : {train_tok:,}  ({train_tok*4/1024/1024:.2f} MB) -> {args.train_output_path}")
+    
     print(f"Valid tokens : {valid_tok:,}  ({valid_tok*4/1024/1024:.2f} MB) -> {args.valid_output_path}")
-    if total_tok > 0:
+    
+    if total_tok > 0 and not train_exists:
         print(f"Train ratio  : {train_tok/total_tok:.4f} (target {args.train_ratio})")
     print(f"Total tokens : {total_tok:,}")
     print(f"Total time   : {elapsed:.1f}s ({elapsed/60:.1f} min)")
