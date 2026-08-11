@@ -66,7 +66,7 @@ def main():
     parser.add_argument("--data_path", default="./data/pretrain_t2t_mini.jsonl")
     parser.add_argument("--train_output_path", default="./data/train_dataset.npy")
     parser.add_argument("--valid_output_path", default="./data/valid_dataset.npy")
-    parser.add_argument("--train_ratio", type=float, default=0.8)
+    parser.add_argument("--train_ratio", type=float, default=0.95)
     parser.add_argument("--chunk_size", type=int, default=2000)
     parser.add_argument("--num_workers", type=int, default=None)
     args = parser.parse_args()

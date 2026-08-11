@@ -312,11 +312,11 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MiniSnail SFT")
-    parser.add_argument("--config_path", type=str, help="Path to config JSON file")
+    parser.add_argument("--config", type=str, help="Path to config JSON file")
     args = parser.parse_args()
 
     # 1. Load configuration
-    if args.config_path:
+    if args.config:
         config = SnailConfig.from_json(args.config_path)
         console.print(f"Loaded config from {args.config_path}")
     elif os.path.exists("config.json"):

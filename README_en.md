@@ -1,23 +1,26 @@
-# 介绍
+# Introduction
 
-Lettle 的小型语言模型，旨在用参数量远少于大型模型的方式，模拟出大型模型的所有能力。
+Lettle's small language model is designed to simulate all the capabilities of a large model with a much smaller parameter model.
+
+[中文](./README.md) | English
+
+# Features
+
+- **Small** - Smaller model size
+
+- **Efficient** - More efficient training and inference
+
+- **Capable** - Retaining the core capabilities of the language model as much as possible
+
+- **Experimental** - For exploring the implementation methods of small language models
+
+- **Simple** - Maintaining a simple code structure that is easy to understand and modify
 
 
 
-# 特点
+# Quick Start
 
-- **Small** — 更小的模型规模
-
-- **Efficient** — 更高效的训练与推理
-- **Capable** — 尽可能保留语言模型的核心能力
-- **Experimental** — 用于探索小型语言模型的实现方式
-- **Simple** — 保持代码结构简单、易于理解和修改
-
-
-
-# 快速开始
-
-## 运行环境
+## Environment
 
 - OS: Windows 11
 - CPU: 11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz
@@ -28,9 +31,9 @@ Lettle 的小型语言模型，旨在用参数量远少于大型模型的方式�
 
 
 
-## Step 1: 下载项目
+## Step 1: Clone
 
-使用 git 进行 clone 操作:
+Clone the project:
 
 ```bash
 git clone https://github.com/Python-Lettle/MiniSnail.git
@@ -39,11 +42,11 @@ cd MiniSnail
 
 
 
-## Step 2: 数据集
+## Step 2: Dataset
 
-确保你有如下格式的数据集：
+Make sure you have a dataset in a format similar to the following:
 
-- 预训练数据集:
+- Pretrain Dataset:
 
 ```
 {"text": "如何才能摆脱拖延症？治愈拖延症并不容易，但以下建议可能有所帮助。"}
@@ -51,7 +54,7 @@ cd MiniSnail
 {"text": "Transformer 通过自注意力机制建模上下文关系，是现代大语言模型的重要基础结构。"}
 ```
 
-- SFT 数据集:
+- SFT Dataset:
 
 ```
 {
@@ -73,13 +76,13 @@ cd MiniSnail
 }
 ```
 
-建议你将数据集存放在目录 `./data` 下
+It is recommended to save these data sets to the directory `./data`
 
 
 
-## Step 3: 预处理数据集
+## Step 3: Preprocess the dataset
 
-在项目根目录下运行如下脚本：
+Navigate to the project root directory and run the following script:
 
 ```bash
 python scripts/data_tokenize.py --tokenizer_path "./model/minimind" --data_path "./data/pretrain.jsonl" --train_output_path "./data/train_dataset.bin" --valid_output_path "./data/valid_dataset.bin" --train_ratio 0.95 --chunk_size 2000
@@ -87,27 +90,27 @@ python scripts/data_tokenize.py --tokenizer_path "./model/minimind" --data_path 
 
 
 
-## Step 4: 预训练
+## Step 4: Pre-training
 
-在 `config.json` 中编辑你所需要用到的参数，你可以通过运行下面的脚本生成这个配置文件：
+Edit the parameters you need to use in `config.json`, you can generate the file by:
 
 ```bash
 python scripts/generate_config.py
 ```
 
-配置好 wandb：
+Configure your wandb:
 
 ```bash
 wandb login
 ```
 
-运行训练脚本：
+Run the training script:
 
 ```bash
 python scripts/train_lm.py --config config.json
 ```
 
-你可以通过如下脚本测试你训练的模型：
+You can test your model by:
 
 ```bash
 python tests/test_lm.py
@@ -117,13 +120,13 @@ python tests/test_lm.py
 
 ## Step 5: SFT
 
-运行训练脚本：
+Run the script:
 
 ```bash
 python scripts/train_lm.py --config config.json
 ```
 
-同样的，你可以通过如下脚本测试你训练的模型：
+Also, you can test your model by:
 
 ```bash
 python tests/test_sft_lm.py
