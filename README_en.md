@@ -40,6 +40,12 @@ git clone https://github.com/Python-Lettle/MiniSnail.git
 cd MiniSnail
 ```
 
+Install the project:
+
+```bash
+pip install -e .
+```
+
 
 
 ## Step 2: Dataset

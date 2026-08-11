@@ -37,6 +37,12 @@ git clone https://github.com/Python-Lettle/MiniSnail.git
 cd MiniSnail
 ```
 
+安装项目：
+
+```bash
+pip install -e .
+```
+
 
 
 ## Step 2: 数据集
