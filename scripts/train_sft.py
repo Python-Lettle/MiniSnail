@@ -317,8 +317,8 @@ if __name__ == "__main__":
 
     # 1. Load configuration
     if args.config:
-        config = SnailConfig.from_json(args.config_path)
-        console.print(f"Loaded config from {args.config_path}")
+        config = SnailConfig.from_json(args.config)
+        console.print(f"Loaded config from {args.config}")
     elif os.path.exists("config.json"):
         config = SnailConfig.from_json("config.json")
         console.print("Loaded config from default config.json")
