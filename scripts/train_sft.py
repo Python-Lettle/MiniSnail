@@ -5,13 +5,9 @@ import random
 import argparse
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
-from torch.optim import AdamW
+from torch.utils.data import DataLoader, Subset
 import torch.nn.functional as F
 from typing import IO, BinaryIO
-from transformers import AutoTokenizer
-
-import multiprocessing as mp
 
 from minisnail.debug import console, LossMonitor
 from minisnail.functions import cosine_schedule, gradient_clipping
@@ -77,6 +73,26 @@ def load_checkpoint(
 
     return checkpoint
 
+def split_dataset(dataset, valid_ratio=0.01, seed=42):
+    """
+    可复现的数据集切分
+    """
+    dataset_size = len(dataset)
+
+    indices = list(range(dataset_size))
+
+    rng = random.Random(seed)
+    rng.shuffle(indices)
+
+    valid_size = int(dataset_size * valid_ratio)
+
+    valid_indices = indices[:valid_size]
+    train_indices = indices[valid_size:]
+
+    return (
+        Subset(dataset, train_indices),
+        Subset(dataset, valid_indices)
+    )
 
 def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = None):
     setup_seed(config.system.seed)
@@ -126,7 +142,17 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
     console.print("accumulation_steps:", accumulation_steps)
 
     # 2. Load datasets
-    train_data = SFTDataset(input_ids_path, labels_path)
+    full_dataset = SFTDataset(
+        input_ids_path,
+        labels_path
+    )
+
+    train_data, valid_data = split_dataset(
+        full_dataset,
+        valid_ratio=0.005,
+        seed=config.system.seed
+    )
+
     train_loader = DataLoader(
         train_data,
         batch_size=batch_size,
@@ -135,6 +161,19 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
         pin_memory=False,
         drop_last=False,
     )
+
+    valid_loader = DataLoader(
+        valid_data,
+        batch_size=1,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=False,
+        drop_last=False,
+    )
+
+    console.print(f"训练集: {len(train_data)} 条")
+    console.print(f"验证集: {len(valid_data)} 条")
+
     total_steps = len(train_loader) * epochs
     console.print(f"数据集大小: {len(train_data)} 条, "
                f"每 epoch {len(train_loader)} 步, "
@@ -246,33 +285,36 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
                 if global_step % config.training.valid_interval == 0:
                     model.eval()
                     with torch.no_grad():
-                        val_losses = []
-                        # 随机采样 20 个样本做验证
-                        valid_indices = random.sample(range(len(train_data)), min(20, len(train_data)))
-                        for vi in valid_indices:
-                            input_ids_v, labels_v = train_data[vi]
-                            input_ids_v = input_ids_v.unsqueeze(0).to(device)
-                            labels_v = labels_v.unsqueeze(0).to(device)
-                            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-                                val_logits = model(input_ids_v)
-                            val_loss = F.cross_entropy(
-                                val_logits[:, :-1, :].contiguous().view(-1, vocab_size),
-                                labels_v[:, 1:].contiguous().view(-1),
-                                ignore_index=-100
+                        val_losses=[]
+                        for input_ids_v, labels_v in valid_loader:
+                            # Data to device
+                            input_ids_v = input_ids_v.to(device)
+                            labels_v = labels_v.to(device)
+                            # Forward pass
+                            with torch.autocast(device_type=device.type, dtype=amp_dtype,enabled=use_amp):
+                                val_logits=model(input_ids_v)
+                            # Compute loss
+                            val_loss=F.cross_entropy(
+                                val_logits[:,:-1,:].contiguous().view(-1,vocab_size),
+                                labels_v[:,1:].contiguous().view(-1),
+                                ignore_index = -100
                             )
+                            # Store loss
                             val_losses.append(val_loss.item())
+                        # Compute mean loss
                         val_loss_mean = np.mean(val_losses)
-                        is_min_loss = valid_loss_monitor.add_loss(global_step, val_loss_mean)
-                        console.print(f"VALID mean loss: {val_loss_mean:.4f}")
+                    
+                    is_min_loss = valid_loss_monitor.add_loss(global_step,val_loss_mean)
+                    console.print(f"VALID mean loss: {val_loss_mean:.4f}")
 
-                        # Wandb logging
-                        if run is not None:
-                            run.log({"valid/loss": val_loss_mean}, step=global_step)
+                    # Wandb logging
+                    if run is not None:
+                        run.log({"valid/loss": val_loss_mean}, step=global_step)
 
-                        # Save best model
-                        if is_min_loss:
-                            torch.save(model.state_dict(), os.path.join(save_model_dir, "sft_best.pt"))
-                            console.print(f"[green]New best model saved (valid loss: {val_loss_mean:.4f})")
+                    # Save best model
+                    if is_min_loss:
+                        torch.save(model.state_dict(), os.path.join(save_model_dir, "sft_best.pt"))
+                        console.print(f"[green]New best model saved (valid loss: {val_loss_mean:.4f})")
                     model.train()
 
             # Epoch end
