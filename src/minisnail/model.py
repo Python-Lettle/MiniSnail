@@ -25,31 +25,34 @@ def top_p_filtering(logits, top_p):
     if top_p >= 1.0:
         return logits
 
-    sorted_logits, sorted_indices = torch.sort(
-        logits,
-        descending=True
-    )
+    # 按概率从大到小排序
+    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
 
-    probs = torch.softmax(sorted_logits, dim=-1)
+    # 转换成概率
+    sorted_probs = torch.softmax(sorted_logits, dim=-1)
 
-    cumulative_probs = torch.cumsum(
-        probs,
-        dim=-1
-    )
+    # 累计概率
+    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
 
-    # 删除累计概率超过top_p的token
+    # 删除累计概率超过 top_p 之后的 token
     sorted_indices_to_remove = cumulative_probs > top_p
-
-    # 保留至少一个token
+    sorted_indices_to_remove[..., 1:] = (sorted_indices_to_remove[..., :-1].clone())
+    # 保留至少一个 token
     sorted_indices_to_remove[..., 0] = False
 
-    indices_to_remove = sorted_indices_to_remove.scatter(
+    # 映射回原始token位置
+    indices_to_remove = torch.zeros_like(sorted_indices_to_remove)
+
+    indices_to_remove.scatter_(
         dim=-1,
         index=sorted_indices,
         src=sorted_indices_to_remove
     )
 
-    logits[indices_to_remove] = float("-inf")
+    logits = logits.masked_fill(
+        indices_to_remove,
+        float("-inf")
+    )
 
     return logits
 
@@ -274,9 +277,9 @@ class SnailModel(nn.Module):
             X = X[:, -self.config.model.context_length:]
 
             logits = self.forward(X)
-            next_token_logits = logits[:, -1] / temperature
-
+            
             if do_sample:
+                next_token_logits = logits[:, -1] / temperature
                 # 在 temperature 缩放之后、top-k 之前加
                 if repetition_penalty > 1.0:
                     # 对已生成的 token 的 logits 打折
@@ -295,6 +298,7 @@ class SnailModel(nn.Module):
                 probs = F.softmax(next_token_logits, dim=-1)
                 next_token_id = torch.multinomial(probs, 1)
             else:
+                next_token_logits = logits[:, -1]
                 next_token_id = next_token_logits.argmax(dim=-1, keepdim=True)
 
             # 遇到 EOS 停止
