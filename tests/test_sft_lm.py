@@ -64,7 +64,7 @@ if __name__ == '__main__':
     # model.load_state_dict(checkpoint["model_state_dict"])
 
     # Load the model weight
-    model_dir = "./model/local_sft_new_model_epo1/sft_best.pt"
+    model_dir = "./model/local_sft_new_model_epo2/sft_new.pt"
     model.load_state_dict(torch.load(model_dir, weights_only=False))
     
     console.print("[yellow]Loading model from weight:", model_dir)
@@ -79,17 +79,17 @@ if __name__ == '__main__':
         for prompt in prompts:
             test_num += 1
             console.print(f"[yellow]Test {test_num}")
-            console.print("Prompt:")
-            console.print(prompt)
+            print("Prompt:")
+            print(prompt)
             response = model.chat(prompt, tokenizer, repetition_penalty=config.generation.repetition_penalty, top_k=config.generation.top_k, max_tokens=config.generation.max_tokens)
-            console.print("Response:")
-            console.print(response)
+            print("Response:")
+            print(response)
     else:
         # Manual Test
         while True:
             prompt: str = input("👤: ")
             response = model.chat(prompt, tokenizer, repetition_penalty=config.generation.repetition_penalty, top_k=config.generation.top_k, max_tokens=config.generation.max_tokens)
-            console.print("🤖:", response)
+            print("🤖:", response)
 
     
     
