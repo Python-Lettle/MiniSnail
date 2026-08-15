@@ -216,8 +216,10 @@ class MultiHeadSelfAttention(nn.Module):
         multi_head_output = rearrange(multi_head_output, "... num_heads seq_len d_v -> ... seq_len (num_heads d_v)")
 
         output = self.W_O(multi_head_output)
-            
-        return output, present_kv
+        
+        if use_cache:
+            return output, present_kv
+        return output
 
 class SnailBlock(nn.Module):
     def __init__(self, config: SnailConfig, rope_embedding=None, device=None, dtype=None) -> None:
@@ -413,7 +415,7 @@ class SnailModel(nn.Module):
             # KV Cache 无法无限增长
             # 当达到 context_length 后：
             # 重新截取最近 context_length tokens 并重新建立 cache
-            if cache_len >= self.config.model.context_length:
+            if X.size(-1) > self.config.model.context_length:
                 X = X[:, -self.config.model.context_length:]
                 logits, past_kv = self.forward(X, use_cache=True, start_pos=0)
                 cache_len = self.config.model.context_length
