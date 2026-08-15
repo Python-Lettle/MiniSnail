@@ -16,6 +16,43 @@ def init_model(config: SnailConfig, device=None, dtype=None):
     model = SnailModel(config, device=device, dtype=dtype)
     return model
 
+def top_p_filtering(logits, top_p):
+    """
+    Nucleus sampling:
+    保留累计概率达到 top_p 的 token
+    """
+
+    if top_p >= 1.0:
+        return logits
+
+    sorted_logits, sorted_indices = torch.sort(
+        logits,
+        descending=True
+    )
+
+    probs = torch.softmax(sorted_logits, dim=-1)
+
+    cumulative_probs = torch.cumsum(
+        probs,
+        dim=-1
+    )
+
+    # 删除累计概率超过top_p的token
+    sorted_indices_to_remove = cumulative_probs > top_p
+
+    # 保留至少一个token
+    sorted_indices_to_remove[..., 0] = False
+
+    indices_to_remove = sorted_indices_to_remove.scatter(
+        dim=-1,
+        index=sorted_indices,
+        src=sorted_indices_to_remove
+    )
+
+    logits[indices_to_remove] = float("-inf")
+
+    return logits
+
 class PWFFN(nn.Module):
     '''
         PWFFN --- Position-Wise Feed-Forward Network
@@ -223,6 +260,7 @@ class SnailModel(nn.Module):
                 temperature=0.85,
                 repetition_penalty=1.2,
                 top_k=50,
+                top_p=0.9,
                 eos_token_id=2,
                 do_sample=True,
                 skip_prompt=True,        # ← 新增：默认只返回新生成的 token
@@ -250,6 +288,9 @@ class SnailModel(nn.Module):
                     next_token_logits = next_token_logits.masked_fill(
                         next_token_logits < threshold, float("-inf")
                     )
+
+                if top_p < 1.0:
+                    next_token_logits = top_p_filtering(next_token_logits, top_p)
 
                 probs = F.softmax(next_token_logits, dim=-1)
                 next_token_id = torch.multinomial(probs, 1)

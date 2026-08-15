@@ -75,8 +75,10 @@ class GenerationConfig:
     max_tokens: int = 512
     temperature: float = 0.8
     top_k: int = 40
+    top_p: float = 0.9
     device: str = "cuda"
     repetition_penalty: float = 1.2
+    greedy: bool = False
 
 @dataclass
 class WandbConfig:
