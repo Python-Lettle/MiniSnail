@@ -81,14 +81,26 @@ if __name__ == '__main__':
             console.print(f"[yellow]Test {test_num}")
             print("Prompt:")
             print(prompt)
-            response = model.chat(prompt, tokenizer, repetition_penalty=config.generation.repetition_penalty, top_k=config.generation.top_k, top_p=config.generation.top_p, max_tokens=config.generation.max_tokens, do_sample=not config.generation.greedy)
+            response = model.chat(
+                prompt, tokenizer, 
+                repetition_penalty=config.generation.repetition_penalty, 
+                top_k=config.generation.top_k, 
+                top_p=config.generation.top_p, 
+                max_tokens=config.generation.max_tokens, 
+                do_sample=not config.generation.greedy)
             print("Response:")
             print(response)
     else:
         # Manual Test
         while True:
             prompt: str = input("👤: ")
-            response = model.chat(prompt, tokenizer, repetition_penalty=config.generation.repetition_penalty, top_k=config.generation.top_k, top_p=config.generation.top_p, max_tokens=config.generation.max_tokens, do_sample=not config.generation.greedy)
+            response = model.chat(
+                prompt, tokenizer, 
+                repetition_penalty=config.generation.repetition_penalty, 
+                top_k=config.generation.top_k, 
+                top_p=config.generation.top_p, 
+                max_tokens=config.generation.max_tokens, 
+                do_sample=not config.generation.greedy)
             print("🤖:", response)
 
     

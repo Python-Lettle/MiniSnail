@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Float
-from torch import Tensor
+from torch import NoneType, Tensor
 from einops import rearrange, einsum
 
 from minisnail.config import SnailConfig
@@ -123,7 +123,7 @@ class RotaryPositionalEmbedding(nn.Module):
         cos, sin = torch.cos(freqs), torch.sin(freqs)
         return torch.stack((cos, sin))
 
-    def forward(self, x: Float[Tensor, " ... seq_len d_k"]) -> torch.Tensor:
+    def forward(self, x: Float[Tensor, " ... seq_len d_k"], start_pos: int = 0) -> torch.Tensor:
         '''
             Apply RoPE to input tensor x
             x: Float[Tensor, " ... seq_len d_k"] Input tensor
@@ -132,7 +132,7 @@ class RotaryPositionalEmbedding(nn.Module):
         '''
         seq_len = x.shape[-2]
         # Dynamically generate position indices
-        token_positions = torch.arange(seq_len, device=x.device)
+        token_positions = torch.arange(start_pos, start_pos + seq_len, device=x.device)
 
         # Slice input tensor by odd-even positions
         x1 = x[..., ::2]
@@ -164,29 +164,60 @@ class MultiHeadSelfAttention(nn.Module):
 
         self.rope_embedding = rope_embedding
 
-    def forward(self, X: Float[Tensor, " ... sequence_length d_in"]) -> Float[Tensor, " ... sequence_length d_out"]:
+    def forward(self, X: Float[Tensor, " ... sequence_length d_in"], past_kv: tuple[torch.Tensor, torch.Tensor] | None = None, use_cache: bool = False, start_pos: int = 0) -> tuple[Float[Tensor, " ... sequence_length d_out"], tuple[torch.Tensor, torch.Tensor]]:
         # 1. Linear projection to get Q K V (all heads together)
         Q = self.W_Q(X)
         K = self.W_K(X)
         V = self.W_V(X)
 
-        # 2. Transform to multi-head form (batch_size, seq_len, d_model) -> (batch_size, seq_len, num_heads, d_k)
+        # 2.1 Transform to multi-head form (batch_size, seq_len, d_model) -> (batch_size, seq_len, num_heads, d_k)
         Q = rearrange(Q, "... seq_len (num_heads d_k) -> ... num_heads seq_len d_k", num_heads=self.num_heads)
         K = rearrange(K, "... seq_len (num_heads d_k) -> ... num_heads seq_len d_k", num_heads=self.num_heads)
         V = rearrange(V, "... seq_len (num_heads d_v) -> ... num_heads seq_len d_v", num_heads=self.num_heads)
         
-        # 2.5 Apply RoPE to Q K (if provided)
+        # 2.2 Apply RoPE to Q K (if provided)
         if self.rope_embedding:
-            Q = self.rope_embedding(Q)
-            K = self.rope_embedding(K)
+            Q = self.rope_embedding(Q, start_pos=start_pos)
+            K = self.rope_embedding(K, start_pos=start_pos)
 
-        # 3. Use causal encoding to calculate scaled dot-product attention
-        multi_head_output: Float[Tensor, " ... queries d_v"] = F.scaled_dot_product_attention(Q, K, V, is_causal=True)
+        # 2.3 Cache KV if required
+        past_len = 0
+        if past_kv is not None:
+            past_k, past_v = past_kv
+            past_len = past_k.shape[-2]
+            K = torch.cat((past_k, K), dim=-2)
+            V = torch.cat((past_v, V), dim=-2)
+
+        if use_cache:
+            present_kv=(K,V)
+        else:
+            present_kv=None
+
+        # 3. Attention
+        if past_len > 0:
+            # 当前 Q 的长度
+            query_len = Q.shape[-2]
+            # 当前 K/V 的总长度
+            key_len = K.shape[-2]
+
+            # Query 的绝对位置
+            query_positions = torch.arange(past_len, past_len + query_len, device=X.device).unsqueeze(-1)
+
+            # Key 的位置
+            key_positions = torch.arange(key_len,device=X.device).unsqueeze(0)
+
+            # causal mask
+            causal_mask = (key_positions <= query_positions)
+
+            multi_head_output: Float[Tensor, " ... queries d_v"] = F.scaled_dot_product_attention(Q, K, V, attn_mask=causal_mask, is_causal=False)
+        else:
+            multi_head_output: Float[Tensor, " ... queries d_v"] = F.scaled_dot_product_attention(Q, K, V, is_causal=True)
+
         multi_head_output = rearrange(multi_head_output, "... num_heads seq_len d_v -> ... seq_len (num_heads d_v)")
 
         output = self.W_O(multi_head_output)
-
-        return output
+            
+        return output, present_kv
 
 class SnailBlock(nn.Module):
     def __init__(self, config: SnailConfig, rope_embedding=None, device=None, dtype=None) -> None:
@@ -201,11 +232,21 @@ class SnailBlock(nn.Module):
         self.norm1 = nn.RMSNorm(d_model, eps=config.model.rms_norm_eps, device=device, dtype=dtype)
         self.norm2 = nn.RMSNorm(d_model, eps=config.model.rms_norm_eps, device=device, dtype=dtype)
         
-    def forward(self, X: Float[Tensor, "... seq_len d_model"]) -> Float[Tensor, "... seq_len d_model"]:
+    def forward(self,
+            X: Float[Tensor, "... seq_len d_model"],
+            past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
+            use_cache: bool = False,
+            start_pos: int = 0
+        ) -> tuple[Float[Tensor, "... seq_len d_model"], tuple[torch.Tensor, torch.Tensor]]:
         # 1. Pre-norm
         _X = self.norm1(X)
         # 2. Causal Multi-Head Self-Attention
-        _X = self.multihead_attention(_X)
+        if use_cache:
+            _X, layer_present_kv = self.multihead_attention(_X, past_kv=past_kv, use_cache=use_cache, start_pos=start_pos)
+        else:
+            _X = self.multihead_attention(_X, start_pos=start_pos)
+            layer_present_kv = None
+
         # 3. X1 = X + multi_head_output
         X1 = X + _X
         # 4. Pre-norm
@@ -214,6 +255,9 @@ class SnailBlock(nn.Module):
         __X = self.ffn(__X)
         # 6. Output = X1 + PWFFN(X1)
         output = X1 + __X
+
+        if use_cache:
+            return output, layer_present_kv
         return output
 
 class SnailModel(nn.Module):
@@ -245,59 +289,114 @@ class SnailModel(nn.Module):
         # 5. Output Linear Layer
         self.output = nn.Linear(config.model.d_model, config.model.vocab_size, device=device, dtype=dtype)
 
-    def forward(self, X: Float[Tensor, "... seq_len"]) -> Float[Tensor, "... seq_len vocab_size"]:
+    def forward(self,
+            X: Float[Tensor, "... seq_len"],
+            past_kv: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
+            use_cache: bool = False,
+            start_pos: int = 0
+        ) -> tuple[Float[Tensor, "... seq_len vocab_size"], list[tuple[torch.Tensor, torch.Tensor]]]:
+        """
+        Forward pass.
+
+        use_cache=False:
+            普通训练模式。
+
+        use_cache=True:
+            generation KV Cache 模式。
+
+        past_kv:
+            [
+                (K_layer_0, V_layer_0),
+                (K_layer_1, V_layer_1),
+                ...
+            ]
+        """
         # 1. Token Embedding
         X = self.embedding(X)
+        
         # 2. Transformer Blocks
-        for block in self.blocks:
-            X = block(X)
+        # Blocks KV Cache
+        present_kv: list[tuple[torch.Tensor, torch.Tensor]] = [] if use_cache else None
+
+        for layer_idx, block in enumerate(self.blocks):
+            if use_cache:
+                layer_past_kv = None
+                if past_kv is not None:
+                    layer_past_kv = past_kv[layer_idx]
+                X, present_key_value = block(X, past_kv=layer_past_kv, use_cache=True, start_pos=start_pos)
+                present_kv.append(present_key_value)
+            else: 
+                X = block(X, start_pos=start_pos)
+
         # 3. Final Norm
         X = self.norm(X)
         # 4. Output Embedding
         output = self.output(X)
+
+        if use_cache:
+            return output, present_kv
         return output
 
     @torch.no_grad()
-    def generate(self, X: torch.Tensor,
-                max_tokens=8192,
-                temperature=0.85,
-                repetition_penalty=1.2,
-                top_k=50,
-                top_p=0.9,
-                eos_token_id=2,
-                do_sample=True,
-                skip_prompt=True,        # ← 新增：默认只返回新生成的 token
-                ):
+    def generate(self, 
+            X: torch.Tensor,
+            max_tokens=8192,
+            temperature=0.85,
+            repetition_penalty=1.2,
+            top_k=50,
+            top_p=0.9,
+            eos_token_id=2,
+            do_sample=True,
+            skip_prompt=True,
+        ):
         if X.dim() == 1:
             X = X.unsqueeze(0)
         X = X.long()
         original_length = X.size(-1)
 
-        for _ in range(max_tokens):
+        # 1. Prompt 长度超过 context length
+        if X.size(-1) > self.config.model.context_length:
             X = X[:, -self.config.model.context_length:]
+        
+        # 2. Prefill
+        # 第一次把整个 prompt 输入模型
+        # 得到：logits + 每一层的 KV Cache
+        logits, past_kv = self.forward(X, use_cache=True, start_pos=0)
+        
+        generated_ids = []
 
-            logits = self.forward(X)
-            
+        # 当前 cache 中有多少 token
+        cache_len = X.size(-1)
+
+        # 3. Autoregressive Generation
+        for _ in range(max_tokens):
+            # Sampling
             if do_sample:
                 next_token_logits = logits[:, -1] / temperature
-                # 在 temperature 缩放之后、top-k 之前加
+                # Repetition Penalty
                 if repetition_penalty > 1.0:
-                    # 对已生成的 token 的 logits 打折
+                    # Prompt 中出现过的 token
                     for token_id in X[0].tolist():
-                        next_token_logits[:, token_id] /= repetition_penalty
+                        next_token_logits[:,token_id] /= repetition_penalty
+
+                    # 已生成 token
+                    for token_id in generated_ids:
+                        next_token_logits[:,token_id] /= repetition_penalty
+                # Top-K
                 if top_k:
                     topk_values, _ = torch.topk(next_token_logits, min(top_k, next_token_logits.size(-1)))
                     threshold = topk_values[:, -1].unsqueeze(-1)
                     next_token_logits = next_token_logits.masked_fill(
                         next_token_logits < threshold, float("-inf")
                     )
-
+                # Top-P
                 if top_p < 1.0:
                     next_token_logits = top_p_filtering(next_token_logits, top_p)
-
+                # Sample
                 probs = F.softmax(next_token_logits, dim=-1)
                 next_token_id = torch.multinomial(probs, 1)
             else:
+                # Greedy Decoding
                 next_token_logits = logits[:, -1]
                 next_token_id = next_token_logits.argmax(dim=-1, keepdim=True)
 
@@ -305,12 +404,38 @@ class SnailModel(nn.Module):
             if eos_token_id is not None and next_token_id.item() == eos_token_id:
                 break
 
+            generated_ids.append(next_token_id.item())
+
+            # 4. 将新 token 添加到序列
             X = torch.cat((X, next_token_id), dim=-1)
 
-        if skip_prompt:
-            return X[:, original_length:]   # 只返回新生成的部分
-        return X                            # 返回完整序列
+            # 5. Context Window 已经满了
+            # KV Cache 无法无限增长
+            # 当达到 context_length 后：
+            # 重新截取最近 context_length tokens 并重新建立 cache
+            if cache_len >= self.config.model.context_length:
+                X = X[:, -self.config.model.context_length:]
+                logits, past_kv = self.forward(X, use_cache=True, start_pos=0)
+                cache_len = self.config.model.context_length
+                continue
+            
+            # 6. KV Cache Decode
+            logits, past_kv = (
+                self.forward(
+                    next_token_id,
+                    past_kv=past_kv,
+                    use_cache=True,
+                    start_pos=cache_len
+                )
+            )
+            cache_len += 1
+        # 7. Construct Output
+        output_ids = torch.tensor([generated_ids], dtype=X.dtype, device=X.device)
 
+        if skip_prompt:
+            return output_ids
+
+        return torch.cat((X[:, :original_length], output_ids), dim=-1)
 
     def chat(self, message, tokenizer, history=None, **kwargs):
         messages = history or []
@@ -325,18 +450,9 @@ class SnailModel(nn.Module):
         # 只加 assistant 标记，不加 <think> 标签
         prompt += "<|im_start|>assistant\n"
 
-        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(
-            self.config.system.device
-        )
+        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(self.config.system.device)
 
-        output_ids = self.generate(
-            input_ids,
-            eos_token_id=tokenizer.eos_token_id,
-            **kwargs
-        )
-
-        response = tokenizer.decode(
-            output_ids[0],
-            skip_special_tokens=True,
-        )
+        # generate() 内部现在自动使用 KV Cache
+        output_ids = self.generate(input_ids,eos_token_id=tokenizer.eos_token_id,**kwargs)
+        response = tokenizer.decode(output_ids[0], skip_special_tokens=True,)
         return response
