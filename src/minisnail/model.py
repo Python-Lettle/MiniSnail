@@ -441,6 +441,99 @@ class SnailModel(nn.Module):
 
         return torch.cat((X[:, :original_length], output_ids), dim=-1)
 
+    @torch.no_grad()
+    def streaming_generate(self, 
+            X: torch.Tensor,
+            max_tokens=512,
+            temperature=0.85,
+            repetition_penalty=1.2,
+            top_k=50,
+            top_p=0.9,
+            eos_token_id=2,
+            do_sample=True,
+        ):
+        if X.dim() == 1:
+            X = X.unsqueeze(0)
+        X = X.long()
+
+        # 1. Prompt 长度超过 context length
+        if X.size(-1) > self.config.model.context_length:
+            X = X[:, -self.config.model.context_length:]
+        
+        # 2. Prefill
+        # 第一次把整个 prompt 输入模型
+        # 得到：logits + 每一层的 KV Cache
+        logits, past_kv = self.forward(X, use_cache=True, start_pos=0)
+        
+        generated_ids = []
+
+        # 当前 cache 中有多少 token
+        cache_len = X.size(-1)
+
+        # 3. Autoregressive Generation
+        for _ in range(max_tokens):
+            # Sampling
+            if do_sample:
+                next_token_logits = logits[:, -1] / temperature
+                # Repetition Penalty
+                if repetition_penalty > 1.0:
+                    # Prompt 中出现过的 token
+                    for token_id in X[0].tolist():
+                        next_token_logits[:,token_id] /= repetition_penalty
+
+                    # 已生成 token
+                    for token_id in generated_ids:
+                        next_token_logits[:,token_id] /= repetition_penalty
+                # Top-K
+                if top_k:
+                    topk_values, _ = torch.topk(next_token_logits, min(top_k, next_token_logits.size(-1)))
+                    threshold = topk_values[:, -1].unsqueeze(-1)
+                    next_token_logits = next_token_logits.masked_fill(
+                        next_token_logits < threshold, float("-inf")
+                    )
+                # Top-P
+                if top_p < 1.0:
+                    next_token_logits = top_p_filtering(next_token_logits, top_p)
+                # Sample
+                probs = F.softmax(next_token_logits, dim=-1)
+                next_token_id = torch.multinomial(probs, 1)
+            else:
+                # Greedy Decoding
+                next_token_logits = logits[:, -1]
+                next_token_id = next_token_logits.argmax(dim=-1, keepdim=True)
+
+            # 遇到 EOS 停止
+            if eos_token_id is not None and next_token_id.item() == eos_token_id:
+                break
+            
+            generated_ids.append(next_token_id.item())
+
+            # 4. 将新 token 添加到序列
+            X = torch.cat((X, next_token_id), dim=-1)
+
+            # 5. Context Window 已经满了
+            # KV Cache 无法无限增长
+            # 当达到 context_length 后：
+            # 重新截取最近 context_length tokens 并重新建立 cache
+            if X.size(-1) > self.config.model.context_length:
+                X = X[:, -self.config.model.context_length:]
+                logits, past_kv = self.forward(X, use_cache=True, start_pos=0)
+                cache_len = self.config.model.context_length
+                continue
+            
+            # 6. KV Cache Decode
+            logits, past_kv = (
+                self.forward(
+                    next_token_id,
+                    past_kv=past_kv,
+                    use_cache=True,
+                    start_pos=cache_len
+                )
+            )
+            cache_len += 1
+
+            yield next_token_id.item()
+
     def chat(self, message, tokenizer, history=None, **kwargs):
         messages = history or []
         messages.append({"role": "user", "content": message})
