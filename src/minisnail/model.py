@@ -9,11 +9,13 @@ from einops import rearrange, einsum
 from minisnail.config import SnailConfig
 from minisnail.debug import console
 
-def init_model(config: SnailConfig, device=None, dtype=None):
+def init_model(config: SnailConfig, model_path: str = None, device=None, dtype=None):
     '''Load a model using the options in config. \n
     It is optional to load the model from a certain weight file.
     '''
     model = SnailModel(config, device=device, dtype=dtype)
+    if model_path is not None:
+        model.load_state_dict(torch.load(model_path))
     return model
 
 def top_p_filtering(logits, top_p):
@@ -342,7 +344,7 @@ class SnailModel(nn.Module):
     @torch.no_grad()
     def generate(self, 
             X: torch.Tensor,
-            max_tokens=8192,
+            max_tokens=512,
             temperature=0.85,
             repetition_penalty=1.2,
             top_k=50,

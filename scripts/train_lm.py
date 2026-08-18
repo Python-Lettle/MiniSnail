@@ -3,7 +3,7 @@ from minisnail.functions import cross_entropy_loss, cosine_schedule, gradient_cl
 from minisnail.config import SnailConfig, DEFAULT_CONFIG
 from minisnail.model import init_model
 from minisnail.dataset import get_dataloader
-from minisnail.util import setup_seed
+from minisnail.util import setup_seed, load_config
 import torch
 from typing import IO, BinaryIO
 import numpy as np
@@ -308,15 +308,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # 1. Load configuration
-    if args.config:
-        config = SnailConfig.from_json(args.config)
-        console.print(f"Loaded config from {args.config}")
-    elif os.path.exists("config.json"):
-        config = SnailConfig.from_json("config.json")
-        console.print("Loaded config from default config.json")
-    else:
-        config = DEFAULT_CONFIG
-        console.print("Loaded default config")
+    config = load_config(args)
 
     # 2. Load checkpoint
     if config.training.use_checkpoint:

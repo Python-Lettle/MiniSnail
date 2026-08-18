@@ -122,15 +122,5 @@ def gradient_clipping(
         parameters (Iterable[torch.nn.Parameter]): collection of trainable parameters.
         max_l2_norm (float): a positive value containing the maximum l2-norm.
     '''
-    # 1. Calculate the l2 norm of the gradient tensor for parameters
-    grads = [parameter.grad.view(-1) for parameter in parameters if parameter.grad is not None]
-    grads = torch.cat(grads)
-    l2_norms = grads.norm().item()
-
-    # 2. Check if clipping is needed
-    scale = max_l2_norm / (l2_norms + eps)
-    if l2_norms > max_l2_norm:
-        # Clip the gradients
-        for parameter in parameters:
-            if parameter.grad is not None:
-                parameter.grad.mul_(scale)
+    # foreach=False：规避 Windows + CUDA 上 _foreach_norm 系列算子的 access violation
+    torch.nn.utils.clip_grad_norm_(parameters, max_norm=max_l2_norm, foreach=False)

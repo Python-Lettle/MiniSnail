@@ -11,7 +11,7 @@ from typing import IO, BinaryIO
 
 from minisnail.debug import console, LossMonitor
 from minisnail.functions import cosine_schedule, gradient_clipping
-from minisnail.util import setup_seed
+from minisnail.util import setup_seed, load_config
 from minisnail.config import SnailConfig, DEFAULT_CONFIG
 from minisnail.dataset import SFTDataset
 from minisnail.model import init_model
@@ -252,7 +252,7 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
                 )
 
                 # Perform optimizer step every accumulation_steps
-                if global_step % accumulation_steps == 0:
+                if step % accumulation_steps == 0:
                     gradient_clipping(model.parameters(), config.training.gradient_clip)
 
                     for param_group in optimizer.param_groups:
@@ -285,16 +285,16 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
                 if global_step % config.training.valid_interval == 0:
                     model.eval()
                     with torch.no_grad():
-                        val_losses=[]
+                        val_losses = []
                         for input_ids_v, labels_v in valid_loader:
                             # Data to device
                             input_ids_v = input_ids_v.to(device)
                             labels_v = labels_v.to(device)
                             # Forward pass
                             with torch.autocast(device_type=device.type, dtype=amp_dtype,enabled=use_amp):
-                                val_logits=model(input_ids_v)
+                                val_logits = model(input_ids_v)
                             # Compute loss
-                            val_loss=F.cross_entropy(
+                            val_loss = F.cross_entropy(
                                 val_logits[:,:-1,:].contiguous().view(-1,vocab_size),
                                 labels_v[:,1:].contiguous().view(-1),
                                 ignore_index = -100
@@ -325,6 +325,7 @@ def train_sft(config: SnailConfig, run: wandb.Run, checkpoint: dict | None = Non
                 f"Average Loss: {avg_epoch_loss:.4f} | "
                 f"Time: {epoch_time:.1f} min"
             )
+            start_step_in_epoch = 0
 
     except KeyboardInterrupt:
         console.print("Training interrupted by user.")
@@ -358,15 +359,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # 1. Load configuration
-    if args.config:
-        config = SnailConfig.from_json(args.config)
-        console.print(f"Loaded config from {args.config}")
-    elif os.path.exists("config.json"):
-        config = SnailConfig.from_json("config.json")
-        console.print("Loaded config from default config.json")
-    else:
-        config = DEFAULT_CONFIG
-        console.print("Loaded default config")
+    config = load_config(args)
     
     # 2. Load checkpoint
     if config.training.use_checkpoint:

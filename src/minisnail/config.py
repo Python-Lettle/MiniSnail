@@ -33,6 +33,7 @@ class TrainingConfig:
     lr: float = 0
     betas: tuple[float, float] = (0.9, 0.95)
     weight_decay: float = 0.001
+    dpo_beta: float = 0.1
     valid_interval: int = 400
     gradient_clip: float = 1.0
     accumulation_steps: int = 1
@@ -57,6 +58,8 @@ class DataConfig:
 
     input_ids_path: str = "./data/sft_input_ids.npy"
     labels_path: str = "./data/sft_labels.npy"
+    
+    dpo_data_path: str = "./data/dpo.jsonl"
 
     save_model_dir: str = "./output/"
     dataset_name: str = "t2t"

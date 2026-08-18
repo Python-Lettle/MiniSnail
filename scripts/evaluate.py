@@ -137,7 +137,7 @@ if __name__ == "__main__":
     model = init_model(config, device=device, dtype=model_dtype)
 
     # Load the model weight
-    model_dir = "./model/local_sft_new_model_epo2/sft_new.pt"
+    model_dir = "./model/local_dpo_model_epo2/dpo_new.pt"
     model.load_state_dict(torch.load(model_dir, weights_only=False))
 
     # Load the dataset

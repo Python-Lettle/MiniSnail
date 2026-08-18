@@ -1,4 +1,5 @@
 import os
+import json
 import torch
 import random
 import numpy as np
@@ -90,3 +91,70 @@ class SFTDataset(Dataset):
     def __getitem__(self, index):
         return (torch.tensor(self.input_ids[index], dtype=torch.long),
                 torch.tensor(self.labels[index], dtype=torch.long))
+
+# ---------- DPO Dataset ----------
+class DPODataset(Dataset):
+
+    def __init__(self, path, tokenizer, max_length):
+        self.items = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                self.items.append(json.loads(line))
+
+        self.tokenizer=tokenizer
+        self.max_length=max_length
+
+    def __len__(self):
+        return len(self.items)
+
+    def encode_chat(self,messages):
+        # 完整对话
+        full_text = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False
+        )
+
+        # 只到 assistant 开始
+        prompt_text = self.tokenizer.apply_chat_template(
+            messages[:1],
+            tokenize=False,
+            add_generation_prompt=True
+        )
+
+        full_ids=self.tokenizer(
+            full_text,
+            max_length=self.max_length,
+            truncation=True,
+            padding=False,
+            return_tensors="pt"
+        ).input_ids[0]
+
+        prompt_ids=self.tokenizer(
+            prompt_text,
+            max_length=self.max_length,
+            truncation=True,
+            padding=False,
+            return_tensors="pt"
+        ).input_ids[0]
+
+        mask = torch.zeros_like(full_ids)
+        start = min(len(prompt_ids),len(full_ids))
+        mask[start:] = 1
+
+        return full_ids,mask
+
+
+
+    def __getitem__(self,index):
+        item = self.items[index]
+
+        chosen_ids,chosen_mask = self.encode_chat(item["chosen"])
+        rejected_ids,rejected_mask = self.encode_chat(item["rejected"])
+
+        return {
+            "chosen_ids" : chosen_ids,
+            "chosen_mask" : chosen_mask,
+            "rejected_ids" : rejected_ids,
+            "rejected_mask" : rejected_mask
+        }

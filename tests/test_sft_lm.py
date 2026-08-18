@@ -64,7 +64,7 @@ if __name__ == '__main__':
     # model.load_state_dict(checkpoint["model_state_dict"])
 
     # Load the model weight
-    model_dir = "./model/local_sft_new_model_epo2/sft_new.pt"
+    model_dir = "./model/local_dpo_model_epo2/dpo_new.pt"
     model.load_state_dict(torch.load(model_dir, weights_only=False))
     
     console.print("[yellow]Loading model from weight:", model_dir)
