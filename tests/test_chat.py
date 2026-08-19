@@ -1,3 +1,5 @@
+import argparse
+
 import torch
 import torch.nn.functional as F
 from transformers import PreTrainedTokenizer
@@ -12,9 +14,16 @@ KVCache = list[tuple[torch.Tensor, torch.Tensor]]
 class ChatSession:
     """A single-user chat session with history and reusable KV Cache."""
 
-    def __init__(self, model: SnailModel, tokenizer: PreTrainedTokenizer, config: SnailConfig):
+    def __init__(
+        self,
+        model: SnailModel,
+        tokenizer: PreTrainedTokenizer,
+        config: SnailConfig,
+        use_kv_cache: bool = True,
+    ):
         self.model, self.tokenizer, self.config = model, tokenizer, config
         self.device = torch.device(config.system.device)
+        self.use_kv_cache = use_kv_cache
         self.history: list[dict[str, str]] = []
         self.cache_ids: list[int] = []
         self.past_kv: KVCache | None = None
@@ -56,6 +65,14 @@ class ChatSession:
     def _prefill(self, prompt_ids: list[int]) -> torch.Tensor:
         """Run only the prompt suffix which is not already in the KV Cache."""
         prompt_ids = prompt_ids[-self.config.model.context_length:]
+        if not self.use_kv_cache:
+            self.cache_ids = prompt_ids
+            self.past_kv = None
+            return self.model.forward(
+                torch.tensor([prompt_ids], dtype=torch.long, device=self.device),
+                use_cache=False,
+            )
+
         prefix_length = self._common_prefix_length(self.cache_ids, prompt_ids)
         self._truncate_cache(prefix_length)
         suffix_ids: list[int] = prompt_ids[prefix_length:]
@@ -100,6 +117,16 @@ class ChatSession:
             generated_ids.append(token_id)
             yield self.tokenizer.decode([token_id], skip_special_tokens=True)
 
+            if not self.use_kv_cache:
+                # No KV Cache: recompute the entire active context for every
+                # token. This trades substantially more compute for lower VRAM.
+                self.cache_ids = (self.cache_ids + [token_id])[-limit:]
+                logits = self.model.forward(
+                    torch.tensor([self.cache_ids], dtype=torch.long, device=self.device),
+                    use_cache=False,
+                )
+                continue
+
             if len(self.cache_ids) >= limit:
                 # Sliding the context changes RoPE positions: rebuild the cache.
                 window_ids = (self.cache_ids + [token_id])[-limit:]
@@ -118,6 +145,13 @@ class ChatSession:
         self.history.append({'role': 'assistant', 'content': response})
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Interactive MiniSnail chat')
+    parser.add_argument(
+        '--no-kv-cache', action='store_true',
+        help='Disable KV Cache to reduce VRAM usage (slower generation).',
+    )
+    args = parser.parse_args()
+
     config = SnailConfig.from_json("./config.json")
     device = torch.device(config.system.device)
     console.print("[yellow]Using device:", device)
@@ -135,7 +169,9 @@ if __name__ == '__main__':
     model.eval()
     model.to(device=device)
 
-    session = ChatSession(model, tokenizer, config)
+    session = ChatSession(model, tokenizer, config, use_kv_cache=not args.no_kv_cache)
+    cache_status = 'enabled' if session.use_kv_cache else 'disabled (slower, lower VRAM)'
+    console.print(f'[yellow]KV Cache: {cache_status}[/yellow]')
     console.print('[dim]Commands: /reset clears the conversation; /exit quits.[/dim]')
 
     while True:
