@@ -70,32 +70,6 @@ def load_checkpoint(
 
     return checkpoint
 
-def get_log_probs(logits, labels, mask):
-
-    logits = logits[:, :-1, :]
-    labels = labels[:,1:]
-    mask = mask[:,1:]
-
-    log_probs = F.log_softmax(logits,dim=-1)
-
-    token_log_probs = torch.gather(
-        log_probs,
-        -1,
-        labels.unsqueeze(-1)
-    ).squeeze(-1)
-
-    token_log_probs *= mask
-
-    token_count = mask.sum(-1).clamp(min=1)
-
-    seq_log_probs = (
-        token_log_probs.sum(-1)
-        /
-        token_count
-    )
-
-    return seq_log_probs
-
 def get_sequence_logprob(logits, labels, mask):
     logits = logits[:,:-1,:]
     labels = labels[:,1:]
@@ -113,7 +87,9 @@ def get_sequence_logprob(logits, labels, mask):
 
     token_log_probs *= mask
 
-    seq_log_probs = token_log_probs.sum(-1)
+    token_count = mask.sum(-1).clamp(min=1)
+
+    seq_log_probs = token_log_probs.sum(-1) / token_count
 
     return seq_log_probs
 
@@ -181,7 +157,7 @@ def train_dpo(config: SnailConfig, run: wandb.Run, checkpoint: dict, policy_mode
     accumulation_steps = config.training.accumulation_steps
     device = torch.device(config.system.device)
     # AMP 混合精度（与 train_sft.py 保持一致，6GB 显存下必需）
-    model_dtype, amp_dtype = config.get_torch_dtype()
+    _, amp_dtype = config.get_torch_dtype()
     use_amp = amp_dtype is not None
     
     console.print(f"beta: {config.training.dpo_beta}")
@@ -230,26 +206,26 @@ def train_dpo(config: SnailConfig, run: wandb.Run, checkpoint: dict, policy_mode
                 rejected_ids = batch["rejected_ids"].to(device)
                 rejected_mask = batch["rejected_mask"].to(device)
 
-                # policy
-                with torch.autocast(device_type="cuda", dtype=model_dtype):
+                # policy 与 reference 使用一致的 autocast，保证 logits 精度一致
+                with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
                     chosen_logits = policy_model(chosen_ids)
                     rejected_logits = policy_model(rejected_ids)
                     policy_chosen = get_sequence_logprob(chosen_logits, chosen_ids, chosen_mask)
                     policy_rejected = get_sequence_logprob(rejected_logits, rejected_ids, rejected_mask)
-                # reference
-                with torch.no_grad():
-                    ref_chosen_logits = reference_model(chosen_ids)
-                    ref_rejected_logits = reference_model(rejected_ids)
-                    ref_chosen = get_sequence_logprob(
-                        ref_chosen_logits,
-                        chosen_ids,
-                        chosen_mask
-                    )
-                    ref_rejected = get_sequence_logprob(
-                        ref_rejected_logits,
-                        rejected_ids,
-                        rejected_mask
-                    )
+                    # reference（冻结，无梯度）
+                    with torch.no_grad():
+                        ref_chosen_logits = reference_model(chosen_ids)
+                        ref_rejected_logits = reference_model(rejected_ids)
+                        ref_chosen = get_sequence_logprob(
+                            ref_chosen_logits,
+                            chosen_ids,
+                            chosen_mask
+                        )
+                        ref_rejected = get_sequence_logprob(
+                            ref_rejected_logits,
+                            rejected_ids,
+                            rejected_mask
+                        )
 
                 loss,acc = dpo_loss(policy_chosen, policy_rejected, ref_chosen, ref_rejected, beta=config.training.dpo_beta)
                 scaled_loss = loss / accumulation_steps
