@@ -27,6 +27,8 @@ def save_checkpoint(
     optimizer: torch.optim.Optimizer,
     global_step: int,
     epoch: int,
+    accumulated_micro_steps: int,
+    has_pending_grads: bool,
     run: wandb.Run,
     out: str | os.PathLike | BinaryIO | IO[bytes],
 ):
@@ -42,6 +44,8 @@ def save_checkpoint(
             'optimizer_state_dict': optimizer.state_dict(),
             'global_step': global_step,
             'epoch': epoch,
+            'accumulated_micro_steps': accumulated_micro_steps,
+            'has_pending_grads': has_pending_grads,
             'wandb_id': run.id,
         },
         out
@@ -69,6 +73,39 @@ def load_checkpoint(
     checkpoint = torch.load(src, weights_only=False)
 
     return checkpoint
+
+def flush_accumulated_grads(
+    policy_model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    config: SnailConfig,
+    total_optimizer_steps: int,
+    optimizer_step: int,
+    current_lr: float,
+    accumulated_micro_steps: int,
+) -> tuple[int, float, int]:
+    """
+    补齐未完成的累积梯度（按当前累积步数重新计算 lr）。
+
+    梯度无法随 checkpoint 跨进程恢复，因此在保存前需把未完成的一半梯度
+    消费掉并把阶梯状态重置为干净状态，保证 resume 时梯度累积计数一致。
+    返回值: (optimizer_step, current_lr, accumulated_micro_steps)
+    """
+    if accumulated_micro_steps > 0:
+        optimizer_step += 1
+        current_lr = cosine_schedule(
+            optimizer_step,
+            max_learning_rate=config.scheduler.max_learning_rate,
+            min_learning_rate=config.scheduler.min_learning_rate,
+            warmup_iters=config.scheduler.warmup_iters,
+            cosine_cycle_iters=total_optimizer_steps,
+        )
+        gradient_clipping(policy_model.parameters(), config.training.gradient_clip)
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = current_lr
+        optimizer.step()
+        optimizer.zero_grad()
+        accumulated_micro_steps = 0
+    return optimizer_step, current_lr, accumulated_micro_steps
 
 def get_sequence_logprob(logits, labels, mask):
     logits = logits[:,:-1,:]
@@ -184,11 +221,11 @@ def train_dpo(config: SnailConfig, run: wandb.Run, checkpoint: dict, policy_mode
     optimizer_step = global_step // accumulation_steps
     total_optimizer_steps = math.ceil(total_steps / accumulation_steps)
     current_lr = config.training.lr
-    accumulated_micro_steps = 0
+    # 恢复累积状态：resume 时保持梯度累积途中状态，避免丢梯度 / 梯度平均错误
+    accumulated_micro_steps = checkpoint.get("accumulated_micro_steps", 0) if checkpoint else 0
     start_epoch = global_step // steps_per_epoch          # 从哪个 epoch 开始
     start_step_in_epoch = global_step % steps_per_epoch   # 该 epoch 内跳过前几步
     console.print("Training start at epoch", start_epoch)
-    has_pending_grads = False
     optimizer.zero_grad()
     try:
         for epoch in range(start_epoch, config.training.epochs):
@@ -230,7 +267,6 @@ def train_dpo(config: SnailConfig, run: wandb.Run, checkpoint: dict, policy_mode
                 loss,acc = dpo_loss(policy_chosen, policy_rejected, ref_chosen, ref_rejected, beta=config.training.dpo_beta)
                 scaled_loss = loss / accumulation_steps
                 scaled_loss.backward()
-                has_pending_grads = True
 
                 # Learning rate scheduler (computed every step for logging)
                 accumulated_micro_steps += 1
@@ -252,7 +288,6 @@ def train_dpo(config: SnailConfig, run: wandb.Run, checkpoint: dict, policy_mode
                     optimizer.step()
                     optimizer.zero_grad()
                     accumulated_micro_steps = 0
-                    has_pending_grads = False
 
                 chosen_reward = config.training.dpo_beta * (policy_chosen - ref_chosen)
                 rejected_reward = config.training.dpo_beta * (policy_rejected - ref_rejected)
@@ -276,30 +311,54 @@ def train_dpo(config: SnailConfig, run: wandb.Run, checkpoint: dict, policy_mode
                     console.print(f"Loss: {loss.item():.4f}")
                     console.print(f"LR: {current_lr:.2e}")
                     console.print("="*50)
+                    # 保存前先补齐未完成的累积梯度，保证 checkpoint 状态干净可恢复
+                    optimizer_step, current_lr, accumulated_micro_steps = flush_accumulated_grads(
+                        policy_model, optimizer, config, total_optimizer_steps,
+                        optimizer_step, current_lr, accumulated_micro_steps,
+                    )
                     # Save checkpoint
-                    save_checkpoint(policy_model, reference_model, optimizer, global_step, epoch, run, os.path.join(save_model_dir, "dpo_checkpoint.pt"))
+                    save_checkpoint(
+                        policy_model, reference_model, optimizer, global_step, epoch,
+                        accumulated_micro_steps, accumulated_micro_steps > 0, run,
+                        os.path.join(save_model_dir, "dpo_checkpoint.pt")
+                    )
                     console.print(f"Checkpoint saved at epoch {epoch+1}, global_step {global_step}")
             start_step_in_epoch = 0
                
     except KeyboardInterrupt:
         console.print("Training interrupted by user.")
-        save_checkpoint(policy_model, reference_model, optimizer, global_step, epoch, run, os.path.join(save_model_dir, "dpo_checkpoint.pt"))
+        optimizer_step, current_lr, accumulated_micro_steps = flush_accumulated_grads(
+            policy_model, optimizer, config, total_optimizer_steps,
+            optimizer_step, current_lr, accumulated_micro_steps,
+        )
+        save_checkpoint(
+            policy_model, reference_model, optimizer, global_step, epoch,
+            accumulated_micro_steps, accumulated_micro_steps > 0, run,
+            os.path.join(save_model_dir, "dpo_checkpoint.pt")
+        )
         console.print(f"Checkpoint saved at epoch {epoch+1}, global_step {global_step}")
         console.print("="*50)
         return
     except Exception as e:
         console.print(f"Training error: {e}")
-        save_checkpoint(policy_model, reference_model, optimizer, global_step, epoch, run, os.path.join(save_model_dir, "dpo_checkpoint.pt"))
+        optimizer_step, current_lr, accumulated_micro_steps = flush_accumulated_grads(
+            policy_model, optimizer, config, total_optimizer_steps,
+            optimizer_step, current_lr, accumulated_micro_steps,
+        )
+        save_checkpoint(
+            policy_model, reference_model, optimizer, global_step, epoch,
+            accumulated_micro_steps, accumulated_micro_steps > 0, run,
+            os.path.join(save_model_dir, "dpo_checkpoint.pt")
+        )
         console.print(f"Checkpoint saved at epoch {epoch+1}, global_step {global_step}")
         console.print("="*50)
         raise e
-    if has_pending_grads:
-        gradient_clipping(policy_model.parameters(), config.training.gradient_clip)
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = current_lr
-        optimizer.step()
-        optimizer.zero_grad()
-        console.print("Applied final optimizer step for remaining accumulated gradients")
+
+    # 正常训练结束后，补齐最后一个未完成的梯度累积周期
+    optimizer_step, current_lr, accumulated_micro_steps = flush_accumulated_grads(
+        policy_model, optimizer, config, total_optimizer_steps,
+        optimizer_step, current_lr, accumulated_micro_steps,
+    )
 
     # Save final model
     final_path = os.path.join(save_model_dir, "dpo_new.pt")
@@ -342,6 +401,8 @@ if __name__ == "__main__":
         p.requires_grad=False
     
     tokenizer = get_tokenizer(config)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     
     # 4. Load the datasets
     dataset = DPODataset(config.data.dpo_data_path, tokenizer, config.model.context_length)

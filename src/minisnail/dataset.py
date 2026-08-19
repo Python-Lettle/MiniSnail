@@ -115,9 +115,10 @@ class DPODataset(Dataset):
             add_generation_prompt=False
         )
 
-        # 只到 assistant 开始
+        # 只到 assistant 开始：取除最后一条 assistant 外的全部消息作为 prompt，
+        # 避免 messages[:1] 在带 system / 多轮对话时边界错位
         prompt_text = self.tokenizer.apply_chat_template(
-            messages[:1],
+            messages[:-1],
             tokenize=False,
             add_generation_prompt=True
         )
