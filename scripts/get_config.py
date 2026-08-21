@@ -1,5 +1,5 @@
 from minisnail.config import SnailConfig
-from minisnail.util import console
+from minisnail.debug import console
 
 if __name__ == '__main__':
     config = SnailConfig()

@@ -55,7 +55,7 @@ class PretrainDataset(Dataset):
         
         # 将 jsonl 数据加载到内存中
         self.samples = []
-        with open(data_path, 'r') as f:
+        with open(data_path, 'r', encoding='utf-8') as f:
             for line in f:
                 self.samples.append(json.loads(line))
 
@@ -72,8 +72,8 @@ class PretrainDataset(Dataset):
         sample: dict = self.samples[index]
         text: str = sample['text']
         
-        tokens: list = self.tokenizer.tokenize(
-            text, add_special_tokens=False, max_length=self.max_length - 2, truncation=True).input_ids
+        tokens: list = self.tokenizer(
+            text, add_special_tokens=False, max_length=self.max_length - 2, truncation=True)['input_ids']
         tokens = [self.tokenizer.bos_token_id] + tokens + [self.tokenizer.eos_token_id]
         input_ids: list = tokens + [self.tokenizer.pad_token_id] * (self.max_length - len(tokens))
         input_ids = torch.tensor(input_ids, dtype=torch.long)
