@@ -271,11 +271,13 @@ class SnailModel(nn.Module):
         '''Constructor for SnailModel'''
         super().__init__()
         self.config = config
-        self.device = device
-        self.dtype = dtype
+        self.device = device if device else torch.device(config.system.device)
+        self.dtype = dtype if dtype else None
+        if self.dtype is None:
+            self.dtype = torch.bfloat16 if config.system.dtype == "bfloat16" else torch.float16
 
         # 1. Token Embedding 
-        self.embedding = nn.Embedding(config.model.vocab_size, config.model.d_model, device=device, dtype=dtype)
+        self.embedding = nn.Embedding(config.model.vocab_size, config.model.d_model, device=self.device, dtype=self.dtype)
 
         # 2. Rotary Positional Embedding Layer for Transformer Blocks
         self.d_k = config.model.d_model // config.model.num_heads

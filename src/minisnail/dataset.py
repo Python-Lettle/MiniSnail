@@ -43,7 +43,7 @@ class PretrainDataset(Dataset):
     预训练数据集
     按文档切分, 每个文档为一个样本, 样本长度为 max_length
     '''
-    def __init__(self, data_path: str, tokenizer: PreTrainedTokenizer, max_length: int = 512):
+    def __init__(self, samples: list[dict], tokenizer: PreTrainedTokenizer, max_length: int = 512):
         """
         Args:
             data_path: np.int32 1d array
@@ -53,11 +53,8 @@ class PretrainDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
         
-        # 将 jsonl 数据加载到内存中
-        self.samples = []
-        with open(data_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                self.samples.append(json.loads(line))
+        # 已经提前划分好是训练集还是验证集的 jsonl 数据样本
+        self.samples = samples
 
     def __len__(self) -> int:
         return len(self.samples)

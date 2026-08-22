@@ -38,6 +38,9 @@ class TrainingConfig:
     from_weight: Optional[str] | None = None
     use_checkpoint: bool = False
     from_checkpoint: str | None = None
+    use_wandb: bool = True
+    use_compile: bool = True
+    use_amp: bool = True
 
 @dataclass
 class SchedulerConfig:
