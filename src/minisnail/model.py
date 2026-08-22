@@ -65,9 +65,18 @@ class PWFFN(nn.Module):
         self.W1: Float[Tensor, " d_ff d_model"] = nn.Parameter(
             torch.empty(d_ff, d_model, device=device, dtype=dtype), requires_grad=True)
         self.W2: Float[Tensor, " d_model d_ff"] = nn.Parameter(
-            torch.empty(d_model, d_ff, device=device, dtype=dtype), requires_grad=True) 
+            torch.empty(d_model, d_ff, device=device, dtype=dtype), requires_grad=True)
         self.W3: Float[Tensor, " d_ff d_model"] = nn.Parameter(
             torch.empty(d_ff, d_model, device=device, dtype=dtype), requires_grad=True)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        """初始化权重 (Kaiming uniform, 与 nn.Linear 默认一致)。
+        torch.empty 不会初始化内存, 不调用 init 会得到垃圾值 (初始 loss 异常大甚至 NaN)
+        """
+        nn.init.kaiming_uniform_(self.W1, a=5 ** 0.5)
+        nn.init.kaiming_uniform_(self.W2, a=5 ** 0.5)
+        nn.init.kaiming_uniform_(self.W3, a=5 ** 0.5)
     
     def forward(self, x: Float[Tensor, " ... d_model"]) -> Float[Tensor, " ... d_model"]:
         '''
@@ -279,8 +288,10 @@ class SnailModel(nn.Module):
             model_dtype, _ = config.get_torch_dtype()
             self.dtype = model_dtype
 
-        # 1. Token Embedding 
+        # 1. Token Embedding
         self.embedding = nn.Embedding(config.model.vocab_size, config.model.d_model, device=self.device, dtype=self.dtype)
+        # nn.Embedding 默认 N(0,1) 方差偏大; LLM 标准做法 std=0.02 (与 MiniMind 一致)
+        nn.init.normal_(self.embedding.weight, std=0.02)
 
         # 2. Rotary Positional Embedding Layer for Transformer Blocks
         self.d_k = config.model.d_model // config.model.num_heads

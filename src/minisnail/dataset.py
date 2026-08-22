@@ -118,13 +118,14 @@ class LazyPretrainDataset(Dataset):
     适合全量数据放不进内存的大数据集; 数据格式与 PretrainDataset 相同 (每行一个 {"text": ...})
     '''
     def __init__(self, data_path: str, tokenizer: PreTrainedTokenizer, max_length: int = 512,
-                 start: int = 0, end: int | None = None):
+                 indices: np.ndarray | None = None):
         """
         Args:
-            data_path: jsonl 文件路径 (整份文件, 通过 start/end 切片划分子集)
+            data_path: jsonl 文件路径 (整份文件, 通过 indices 行号数组划分子集)
             tokenizer: 分词器
             max_length: 样本最大长度 (context_length)
-            start/end: 行号区间 [start, end), 用于在同一份文件上划分训练集/验证集
+            indices: 本子集包含的行号数组 (int64); None 表示全部行。
+                     用于在同一份文件上划分训练集/验证集 (如固定 seed 的 permutation 切分)
         """
         super().__init__()
         self.data_path = data_path
@@ -132,14 +133,13 @@ class LazyPretrainDataset(Dataset):
         self.max_length = max_length
         self.offsets = load_line_offsets(data_path)
         num_lines = len(self.offsets)
-        self.start = start
-        self.end = num_lines if end is None else min(end, num_lines)
+        self.indices = np.arange(num_lines, dtype=np.int64) if indices is None else np.asarray(indices, dtype=np.int64)
         # 文件句柄按进程持有 (DataLoader 多 worker 时每个进程独立打开)
         self._fh = None
         self._fh_pid = None
 
     def __len__(self) -> int:
-        return self.end - self.start
+        return len(self.indices)
 
     def _get_fh(self):
         if self._fh is None or self._fh_pid != os.getpid():
@@ -149,12 +149,13 @@ class LazyPretrainDataset(Dataset):
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         fh = self._get_fh()
-        fh.seek(int(self.offsets[self.start + index]))
+        line_no = int(self.indices[index])
+        fh.seek(int(self.offsets[line_no]))
         line = fh.readline()
         try:
             text: str = json.loads(line)['text']
         except (json.JSONDecodeError, KeyError) as e:
             raise ValueError(
-                f"{self.data_path} 第 {self.start + index} 行解析失败: {e!r}") from e
+                f"{self.data_path} 第 {line_no} 行解析失败: {e!r}") from e
         return encode_text(self.tokenizer, text, self.max_length)
 

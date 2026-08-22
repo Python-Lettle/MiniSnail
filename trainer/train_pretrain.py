@@ -102,12 +102,12 @@ def load_checkpoint(
 def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader: DataLoader, model: nn.Module, optimizer: Optimizer, save_model_dir: str = "./output", checkpoint: dict[str, Any] | None = None, run: wandb.Run | None = None):
     # 计算 epoch 和 step 的数量
     total_steps = len(train_dataloader) * config.training.epochs
+    total_optimizer_steps = total_steps // config.training.accumulation_steps
     console.print(f"Train dataset samples: {len(train_dataloader.dataset)} \n"
                f"Val dataset samples: {len(val_dataloader.dataset)} \n"
                f"Total epochs: {config.training.epochs} \n"
                f"Total steps: {total_steps}")
     epoch = start_epoch = 0
-    step = 0
     global_step = 0
     optimizer_step = 0
     if checkpoint is not None:
@@ -220,6 +220,7 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
                 if global_step % config.training.print_interval == 0:
                     console.print(f"Epoch [{epoch + 1}/{config.training.epochs}]")
                     console.print(f"Step {global_step}/{total_steps}")
+                    console.print(f"Optimizer Step: {optimizer_step}/{total_optimizer_steps}")
                     console.print(f"Loss: {loss.item():.4f}")
                     console.print(f"{config.training.print_interval} Steps completed")
                     console.print("="*50)
@@ -266,8 +267,8 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
 
         # 训练正常结束: flush 残余梯度, 保存最终模型和 checkpoint
         console.print(f"[green]Training finished at global_step {global_step} / {total_steps}")
+        save_and_exit()  # 先 flush 残余梯度并保存 checkpoint, 保证 model_final 与 checkpoint 权重一致
         torch.save(base_model.state_dict(), os.path.join(save_model_dir, "model_final.pt"))
-        save_and_exit()
 
     except KeyboardInterrupt:
         # 手动中断: 保存断点以便续训
@@ -297,12 +298,18 @@ if __name__ == '__main__':
     
     # 加载数据 (懒加载: 只建行偏移索引, 不把全量文本读入内存)
     # 首次运行扫描全文件建索引并缓存到 <data_path>.idx.npz, 之后秒级启动
+    # train/val 划分: 用固定 seed 对全量行号做 permutation 后按比例切分
+    # (固定 seed 保证重启/断点续训时划分完全一致, 验证集不会混入训练集)
+    num_lines = len(load_line_offsets(args.data_path))
+    split_index = int(num_lines * args.train_ratio)
+    perm = np.random.default_rng(config.system.seed).permutation(num_lines)
+    train_indices, val_indices = perm[:split_index], perm[split_index:]
+
     train_dataset = LazyPretrainDataset(
         data_path=args.data_path,
         tokenizer=tokenizer,
         max_length=config.model.context_length,
-        start=0,
-        end=int(len(load_line_offsets(args.data_path)) * args.train_ratio),
+        indices=train_indices,
     )
 
     train_dataloader = get_dataloader(
@@ -316,7 +323,7 @@ if __name__ == '__main__':
         data_path=args.data_path,
         tokenizer=tokenizer,
         max_length=config.model.context_length,
-        start=len(train_dataset),
+        indices=val_indices,
     )
     
     val_dataloader = get_dataloader(
