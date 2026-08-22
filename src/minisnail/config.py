@@ -105,7 +105,7 @@ class SnailConfig:
     def get_torch_dtype(self):
         """Get torch.dtype from system.dtype string. Returns (model_dtype, amp_dtype)."""
         dtype_map = {
-            "float32": (torch.float32, None),
+            "float32": (torch.float32, torch.bfloat16),
             "bfloat16": (torch.bfloat16, torch.bfloat16),
             "float16": (torch.float16, torch.float16),
         }

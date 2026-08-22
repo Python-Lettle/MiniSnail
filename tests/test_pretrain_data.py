@@ -1,3 +1,4 @@
+import json
 import argparse
 from minisnail.dataset import PretrainDataset, get_dataloader
 from minisnail.tokenizer import get_tokenizer
@@ -14,9 +15,14 @@ if __name__ == '__main__':
     config = SnailConfig.from_json(args.config)
     tokenizer = get_tokenizer(config)
     setup_seed(config.system.seed)
+    
+    samples = []
+    with open(args.data_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            samples.append(json.loads(line))
 
     dataset = PretrainDataset(
-        data_path=args.data_path,
+        samples=samples,
         tokenizer=tokenizer,
         max_length=config.model.context_length,
     )
