@@ -156,10 +156,10 @@ class MultiHeadSelfAttention(nn.Module):
         self.d_v: int = self.d_k
 
         # Construct multi-head Q K V matrices
-        self.W_Q = nn.Linear(d_model, d_model, device=device, dtype=dtype)
-        self.W_K = nn.Linear(d_model, d_model, device=device, dtype=dtype)
-        self.W_V = nn.Linear(d_model, d_model, device=device, dtype=dtype)
-        self.W_O = nn.Linear(d_model, d_model, device=device, dtype=dtype)
+        self.W_Q = nn.Linear(d_model, d_model, device=device, dtype=dtype, bias=False)
+        self.W_K = nn.Linear(d_model, d_model, device=device, dtype=dtype, bias=False)
+        self.W_V = nn.Linear(d_model, d_model, device=device, dtype=dtype, bias=False)
+        self.W_O = nn.Linear(d_model, d_model, device=device, dtype=dtype, bias=False)
 
         self.rope_embedding = rope_embedding
 
@@ -274,23 +274,28 @@ class SnailModel(nn.Module):
         self.device = device if device else torch.device(config.system.device)
         self.dtype = dtype if dtype else None
         if self.dtype is None:
-            self.dtype = torch.bfloat16 if config.system.dtype == "bfloat16" else torch.float16
+            # get_torch_dtype 返回 (model_dtype, amp_dtype), 这里只取 model_dtype
+            model_dtype, _ = config.get_torch_dtype()
+            self.dtype = model_dtype
 
         # 1. Token Embedding 
         self.embedding = nn.Embedding(config.model.vocab_size, config.model.d_model, device=self.device, dtype=self.dtype)
 
         # 2. Rotary Positional Embedding Layer for Transformer Blocks
         self.d_k = config.model.d_model // config.model.num_heads
-        self.rope = RotaryPositionalEmbedding(config.model.rope_theta, self.d_k, config.model.context_length, device=device, dtype=dtype)
+        self.rope = RotaryPositionalEmbedding(config.model.rope_theta, self.d_k, config.model.context_length, device=self.device, dtype=self.dtype)
 
         # 3. SnailModel Blocks
-        self.blocks = nn.ModuleList([SnailBlock(config, rope_embedding=self.rope, device=device, dtype=dtype) for _ in range(config.model.num_layers)])
+        self.blocks = nn.ModuleList([SnailBlock(config, rope_embedding=self.rope, device=self.device, dtype=self.dtype) for _ in range(config.model.num_layers)])
 
         # 4. Final Norm
-        self.norm = nn.RMSNorm(config.model.d_model, eps=config.model.rms_norm_eps, device=device, dtype=dtype)
+        self.norm = nn.RMSNorm(config.model.d_model, eps=config.model.rms_norm_eps, device=self.device, dtype=self.dtype)
         
         # 5. Output Linear Layer
-        self.output = nn.Linear(config.model.d_model, config.model.vocab_size, device=device, dtype=dtype)
+        self.output = nn.Linear(config.model.d_model, config.model.vocab_size, device=self.device, dtype=self.dtype, bias=False)
+
+        # weight tying
+        self.output.weight = self.embedding.weight
 
     def forward(self,
             X: Float[Tensor, "... seq_len"],
