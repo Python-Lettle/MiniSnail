@@ -377,9 +377,16 @@ if __name__ == '__main__':
         console.print(f"[green]Loaded model state from checkpoint")
 
     # 编译模型
+    # 注意: 编译失败通常发生在首次 forward (而非 compile 调用时), 需要 warmup 验证
     if config.training.use_compile:
-        model = torch.compile(model)
-        console.print("[green]Model compiled successfully")
+        try:
+            compiled = torch.compile(model)
+            with torch.no_grad():
+                compiled(torch.zeros(1, 2, dtype=torch.long, device=model.device))
+            model = compiled
+            console.print("[green]Model compiled successfully")
+        except Exception as e:
+            console.print(f"[yellow]torch.compile 不可用, 回退 eager 模式: {type(e).__name__}: {e}")
     
     # 加载 Tokenizer & 优化器
     tokenizer = get_tokenizer(config)

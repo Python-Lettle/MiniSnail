@@ -137,7 +137,8 @@ class RotaryPositionalEmbedding(nn.Module):
         x1 = x[..., ::2]
         x2 = x[..., 1::2]
         # Get corresponding cos sin values according to token positions
-        cos, sin = self.angle_cache[:, token_positions, :]
+        # buffer 保持 fp32 保证角度精度, 计算时对齐输入 dtype (AMP 下 Q/K 为低精度)
+        cos, sin = self.angle_cache[:, token_positions, :].to(dtype=x.dtype)
 
         # Apply rotation to each x pair
         x1_rot = cos * x1 - sin * x2

@@ -103,11 +103,15 @@ class SnailConfig:
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
     def get_torch_dtype(self):
-        """Get torch.dtype from system.dtype string. Returns (model_dtype, amp_dtype)."""
+        """Get torch.dtype from system.dtype string. Returns (model_dtype, amp_dtype).
+
+        标准 AMP 语义: 模型权重恒为 fp32, autocast 只降低前向计算精度。
+        (纯 fp16/bf16 权重的梯度无法被 GradScaler 处理, 且数值稳定性差)
+        """
         dtype_map = {
-            "float32": (torch.float32, torch.bfloat16),
-            "bfloat16": (torch.bfloat16, torch.bfloat16),
-            "float16": (torch.float16, torch.float16),
+            "float32": (torch.float32, None),
+            "bfloat16": (torch.float32, torch.bfloat16),
+            "float16": (torch.float32, torch.float16),
         }
         return dtype_map.get(self.system.dtype, (torch.float32, None))
 
