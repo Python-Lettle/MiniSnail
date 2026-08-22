@@ -51,20 +51,6 @@ class SchedulerConfig:
     cosine_cycle_iters: int = 6000
 
 @dataclass
-class DataConfig:
-    """Data configuration"""
-    train_data_path: str = "./data/train_dataset.npy"
-    valid_data_path: str = "./data/valid_dataset.npy"
-
-    input_ids_path: str = "./data/sft_input_ids.npy"
-    labels_path: str = "./data/sft_labels.npy"
-    
-    dpo_data_path: str = "./data/dpo.jsonl"
-
-    save_model_dir: str = "./output/"
-    dataset_name: str = "t2t"
-
-@dataclass
 class SystemConfig:
     """System configuration"""
     device: str = "cuda"
@@ -97,7 +83,6 @@ class SnailConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
-    data: DataConfig = field(default_factory=DataConfig)
     system: SystemConfig = field(default_factory=SystemConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
@@ -123,7 +108,6 @@ class SnailConfig:
             model=ModelConfig(**config_dict.get("model", {})),
             training=TrainingConfig(**config_dict.get("training", {})),
             scheduler=SchedulerConfig(**config_dict.get("scheduler", {})),
-            data=DataConfig(**config_dict.get("data", {})),
             system=SystemConfig(**config_dict.get("system", {})),
             generation=GenerationConfig(**config_dict.get("generation", {})),
             wandb=WandbConfig(**config_dict.get("wandb", {})),
@@ -143,7 +127,6 @@ class SnailConfig:
             "model": self.model.__dict__,
             "training": self.training.__dict__,
             "scheduler": self.scheduler.__dict__,
-            "data": self.data.__dict__,
             "system": self.system.__dict__,
             "generation": self.generation.__dict__,
             "wandb": self.wandb.__dict__,

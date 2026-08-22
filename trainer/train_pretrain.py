@@ -1,6 +1,5 @@
 import os
 import time
-import json
 import wandb
 import random
 import argparse
@@ -13,7 +12,7 @@ from torch.utils.data import DataLoader
 from torch.optim import Optimizer
 import torch.nn.functional as F
 
-from minisnail.dataset import PretrainDataset, get_dataloader
+from minisnail.dataset import LazyPretrainDataset, get_dataloader, load_line_offsets
 from minisnail.functions import cosine_schedule, gradient_clipping
 from minisnail.tokenizer import get_tokenizer
 from minisnail.config import SnailConfig
@@ -100,7 +99,7 @@ def load_checkpoint(
 
     return checkpoint
 
-def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader: DataLoader, model: nn.Module, optimizer: Optimizer, checkpoint: dict[str, Any] | None = None, run: wandb.Run | None = None):
+def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader: DataLoader, model: nn.Module, optimizer: Optimizer, save_model_dir: str = "./output", checkpoint: dict[str, Any] | None = None, run: wandb.Run | None = None):
     # 计算 epoch 和 step 的数量
     total_steps = len(train_dataloader) * config.training.epochs
     console.print(f"Train dataset samples: {len(train_dataloader.dataset)} \n"
@@ -158,9 +157,9 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
             console.print("[yellow]Pending gradients updated")
         save_checkpoint(
             base_model, optimizer, scaler, global_step, epoch + 1, 0, optimizer_step, run,
-            os.path.join(config.data.save_model_dir, "checkpoint.pt"),
+            os.path.join(save_model_dir, "checkpoint.pt"),
         )
-        console.print(f"[green]Checkpoint saved at global_step {global_step} / {total_steps}")
+        console.print(f"[green]Checkpoint saved to {save_model_dir} at global_step {global_step} / {total_steps}")
         console.print("="*50)
 
     console.print(f"[blue]Training start at epoch {start_epoch}, global_step {global_step}")
@@ -253,7 +252,7 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
                         is_min_loss = val_loss_mean < val_min_loss
                         if is_min_loss:
                             val_min_loss = val_loss_mean
-                            torch.save(base_model.state_dict(), os.path.join(config.data.save_model_dir, "model_best.pt"))
+                            torch.save(base_model.state_dict(), os.path.join(save_model_dir, "model_best.pt"))
 
                         # Wandb logging
                         if run is not None:
@@ -267,7 +266,7 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
 
         # 训练正常结束: flush 残余梯度, 保存最终模型和 checkpoint
         console.print(f"[green]Training finished at global_step {global_step} / {total_steps}")
-        torch.save(base_model.state_dict(), os.path.join(config.data.save_model_dir, "model_final.pt"))
+        torch.save(base_model.state_dict(), os.path.join(save_model_dir, "model_final.pt"))
         save_and_exit()
 
     except KeyboardInterrupt:
@@ -284,7 +283,8 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='./config.json')
-    parser.add_argument('--data_path', type=str, default='tests/data/pretrain.jsonl')
+    parser.add_argument('--data_path', type=str, default='./dataset/full/pretrain_t2t.jsonl')
+    parser.add_argument('--save_model_dir', type=str, default='./output/new_pretrain')
     parser.add_argument('--train_ratio', type=float, default=0.95)
     args = parser.parse_args()
     
@@ -295,39 +295,35 @@ if __name__ == '__main__':
     # 设置随机种子
     setup_seed(config.system.seed)
     
-    # 加载样本
-    samples: list[dict] = []
-    with open(args.data_path, 'r', encoding="utf-8") as f:
-        for line in f:
-            samples.append(json.loads(line))
-    
-    # 划分训练集和验证集
-    split_index = int(len(samples) * args.train_ratio)
-    train_samples = samples[:split_index]
-    val_samples = samples[split_index:]
-
-    train_dataset = PretrainDataset(
-        samples=train_samples,
+    # 加载数据 (懒加载: 只建行偏移索引, 不把全量文本读入内存)
+    # 首次运行扫描全文件建索引并缓存到 <data_path>.idx.npz, 之后秒级启动
+    train_dataset = LazyPretrainDataset(
+        data_path=args.data_path,
         tokenizer=tokenizer,
         max_length=config.model.context_length,
+        start=0,
+        end=int(len(load_line_offsets(args.data_path)) * args.train_ratio),
     )
-    
+
     train_dataloader = get_dataloader(
         dataset=train_dataset,
         batch_size=config.training.batch_size,
         shuffle=True,
+        drop_last=False,
     )
-    
-    val_dataset = PretrainDataset(
-        samples=val_samples,
+
+    val_dataset = LazyPretrainDataset(
+        data_path=args.data_path,
         tokenizer=tokenizer,
         max_length=config.model.context_length,
+        start=len(train_dataset),
     )
     
     val_dataloader = get_dataloader(
         dataset=val_dataset,
         batch_size=config.training.batch_size,
-        shuffle=True,
+        shuffle=False,
+        drop_last=True,
     )
     
     # 尝试加载断点
@@ -396,8 +392,10 @@ if __name__ == '__main__':
         console.print(f"[green]Loaded optimizer state from checkpoint")
     
     # 开始训练
+    os.makedirs(args.save_model_dir, exist_ok=True)
     start_time = time.time()
-    train_loop(config, train_dataloader, val_dataloader, model, optimizer, checkpoint=checkpoint, run=run)
+    train_loop(config, train_dataloader, val_dataloader, model, optimizer,
+               save_model_dir=args.save_model_dir, checkpoint=checkpoint, run=run)
     end_time = time.time()
 
     console.print(f"[green]Training time: {end_time - start_time:.2f} s")

@@ -219,6 +219,7 @@ __marimo__/
 
 # Encoded dataset
 *.npy
+*.idx.npz
 
 config.json
 wandb
@@ -231,3 +232,6 @@ valid_loss_curve.png
 
 eval/
 output/
+
+# Triton/torch.compile 缓存
+.triton_cache/

@@ -23,9 +23,7 @@ def print_train_config(config: SnailConfig):
     console.print("Use checkpoint:", config.training.use_checkpoint)
     console.print("Use wandb:", config.training.use_wandb)
     console.print("Use compile:", config.training.use_compile)
-
-    console.print("Save model dir:", config.data.save_model_dir)
-
+    
     console.print("Epochs:", config.training.epochs)
     console.print("Batch size:", config.training.batch_size)
     console.print("Accumulation steps:", config.training.accumulation_steps)
