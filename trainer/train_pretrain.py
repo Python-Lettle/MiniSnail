@@ -95,7 +95,10 @@ def load_checkpoint(
     if isinstance(src, str) or isinstance(src, os.PathLike):
         src = open(src, 'rb')
     # Load the model state from the checkpoint
-    checkpoint = torch.load(src, weights_only=False)
+    # 注意: checkpoint 是从 GPU 模型保存的, 默认 map_location 会把张量加载回原设备(GPU),
+    # 导致续训时同时占用一份 checkpoint 权重+优化器状态和新建模型, 显存翻倍直至 OOM。
+    # 显式映射到 CPU, load_state_dict 会按需拷贝到模型所在设备。
+    checkpoint = torch.load(src, map_location="cpu", weights_only=False)
 
     return checkpoint
 
@@ -156,7 +159,7 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
             has_pending_grads = False
             console.print("[yellow]Pending gradients updated")
         save_checkpoint(
-            base_model, optimizer, scaler, global_step, epoch + 1, 0, optimizer_step, run,
+            base_model, optimizer, scaler, global_step, epoch, 0, optimizer_step, run,
             os.path.join(save_model_dir, "checkpoint.pt"),
         )
         console.print(f"[green]Checkpoint saved to {save_model_dir} at global_step {global_step} / {total_steps}")

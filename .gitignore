@@ -233,5 +233,7 @@ valid_loss_curve.png
 eval/
 output/
 
+*eval_result.txt
+
 # Triton/torch.compile 缓存
 .triton_cache/

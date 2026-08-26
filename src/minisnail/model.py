@@ -271,6 +271,29 @@ class SnailBlock(nn.Module):
             return output, layer_present_kv
         return output
 
+
+def _no_repeat_ngram_mask(next_token_logits, seq, no_repeat_ngram_size):
+    """把会复现历史 n-gram 的候选 token 置为 -inf, 抑制"答完停不下来/循环"的退化。
+
+    args:
+        next_token_logits: shape (1, vocab_size)
+        seq: list[int] 当前完整 token 序列 (prompt + 已生成)
+        no_repeat_ngram_size: n-gram 长度, <=1 表示关闭
+    """
+    n = no_repeat_ngram_size
+    if not n or n < 2 or len(seq) < n:
+        return next_token_logits
+    prefix = tuple(seq[-(n - 1):])
+    banned = {
+        seq[i + n - 1]
+        for i in range(len(seq) - n + 1)
+        if tuple(seq[i:i + n - 1]) == prefix
+    }
+    for t in banned:
+        next_token_logits[:, t] = float("-inf")
+    return next_token_logits
+
+
 class SnailModel(nn.Module):
     def __init__(
         self,
@@ -368,6 +391,7 @@ class SnailModel(nn.Module):
             eos_token_id=2,
             do_sample=True,
             skip_prompt=True,
+            no_repeat_ngram_size=0,
         ):
         if X.dim() == 1:
             X = X.unsqueeze(0)
@@ -402,6 +426,8 @@ class SnailModel(nn.Module):
                     # 已生成 token
                     for token_id in generated_ids:
                         next_token_logits[:,token_id] /= repetition_penalty
+                # n-gram 抑制放在 top_k/top_p 之前, 保证 top_k 始终保留候选, 避免 logits 全 -inf
+                next_token_logits = _no_repeat_ngram_mask(next_token_logits, X[0].tolist(), no_repeat_ngram_size)
                 # Top-K
                 if top_k:
                     topk_values, _ = torch.topk(next_token_logits, min(top_k, next_token_logits.size(-1)))
@@ -418,6 +444,10 @@ class SnailModel(nn.Module):
             else:
                 # Greedy Decoding
                 next_token_logits = logits[:, -1]
+                if repetition_penalty > 1.0:
+                    for token_id in X[0].tolist():
+                        next_token_logits[:, token_id] /= repetition_penalty
+                next_token_logits = _no_repeat_ngram_mask(next_token_logits, X[0].tolist(), no_repeat_ngram_size)
                 next_token_id = next_token_logits.argmax(dim=-1, keepdim=True)
 
             # 遇到 EOS 停止
@@ -467,6 +497,7 @@ class SnailModel(nn.Module):
             top_p=0.9,
             eos_token_id=2,
             do_sample=True,
+            no_repeat_ngram_size=0,
         ):
         if X.dim() == 1:
             X = X.unsqueeze(0)
@@ -500,6 +531,8 @@ class SnailModel(nn.Module):
                     # 已生成 token
                     for token_id in generated_ids:
                         next_token_logits[:,token_id] /= repetition_penalty
+                # n-gram 抑制放在 top_k/top_p 之前, 保证 top_k 始终保留候选, 避免 logits 全 -inf
+                next_token_logits = _no_repeat_ngram_mask(next_token_logits, X[0].tolist(), no_repeat_ngram_size)
                 # Top-K
                 if top_k:
                     topk_values, _ = torch.topk(next_token_logits, min(top_k, next_token_logits.size(-1)))
@@ -516,6 +549,10 @@ class SnailModel(nn.Module):
             else:
                 # Greedy Decoding
                 next_token_logits = logits[:, -1]
+                if repetition_penalty > 1.0:
+                    for token_id in X[0].tolist():
+                        next_token_logits[:, token_id] /= repetition_penalty
+                next_token_logits = _no_repeat_ngram_mask(next_token_logits, X[0].tolist(), no_repeat_ngram_size)
                 next_token_id = next_token_logits.argmax(dim=-1, keepdim=True)
 
             # 遇到 EOS 停止
