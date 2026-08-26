@@ -1,139 +1,120 @@
-# Introduction
+# MiniSnail
 
-Lettle's small language model is designed to simulate all the capabilities of a large model with a much smaller parameter model.
+MiniSnail is a lightweight language model project, aiming to **simulate the core capabilities of large models with far fewer parameters, and complete the entire training process of large language models** - from data, pre-training, to instruction fine-tuning (SFT) and preference alignment (DPO).
 
-[中文](./README.md) | English
+## Project Features
 
-# Features
+- **Small** — Smaller model size
+- **Efficient** — More efficient training and inference
+- **Capable** — Try to retain the core capabilities of language models as much as possible
+- **Experimental** — Used to explore the implementation methods of small language models
+- **Simple** — Maintain a simple code structure, easy to understand and modify
 
-- **Small** - Smaller model size
+## Project Progress
 
-- **Efficient** - More efficient training and inference
+```
+Raw Data -> MiniMind Tokenizer   (vocab_size = 6400)
+-> Pre-training         (Completed)
+-> SFT                  (See the legacy/main branch)
+-> DPO                  (See the legacy/main branch)
+```
 
-- **Capable** - Retaining the core capabilities of the language model as much as possible
+The pre-training related code and tools are located in the `main` branch of this repository; the training scripts for SFT and DPO are in the `legacy/main` branch.
 
-- **Experimental** - For exploring the implementation methods of small language models
+## Quick Start
 
-- **Simple** - Maintaining a simple code structure that is easy to understand and modify
-
-
-
-# Quick Start
-
-## Environment
+### Operating Environment
 
 - OS: Windows 11
 - CPU: 11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz
 - RAM: 16 GB
 - GPU: NVIDIA GeForce RTX 3060 Laptop (6GB)
-- CUDA==13.2
-- Python==3.12.9
+- CUDA: 13.2
+- Python: 3.12.9
 
-
-
-## Step 1: Clone
-
-Clone the project:
+### Step 1: Clone and Install
 
 ```bash
 git clone https://github.com/Python-Lettle/MiniSnail.git
 cd MiniSnail
-```
-
-Install the project:
-
-```bash
 pip install -e .
 ```
 
+### Step 2: Dataset
 
-
-## Step 2: Dataset
-
-Make sure you have a dataset in a format similar to the following:
-
-- Pretrain Dataset:
+The project uses pre-trained data in the **JSONL** format, with one sample per line:
 
 ```
-{"text": "如何才能摆脱拖延症？治愈拖延症并不容易，但以下建议可能有所帮助。"}
-{"text": "清晨的阳光透过窗帘洒进房间，桌上的书页被风轻轻翻动。"}
-{"text": "Transformer 通过自注意力机制建模上下文关系，是现代大语言模型的重要基础结构。"}
+How can one get rid of procrastination? Healing from procrastination is not easy, but the following suggestions might be helpful. }
+The morning sunlight filtered through the curtains and streamed into the room. The pages of the books on the table were gently turned by the wind. }
+The Transformer model models the context relationships through the self-attention mechanism, which is an important foundational structure of modern large language models. }
 ```
 
-- SFT Dataset:
+The data is lazily loaded row-by-row through `LazyPretrainDataset` (only establishing row offset indices, without fully reading into memory), so **there is no need to pre-phrase into bin files**.
 
-```
+SFT data is in conversation format:
+
+```json
 {
-    "conversations": [
-        {"role": "user", "content": "你好"},
-        {"role": "assistant", "content": "你好！"},
-        {"role": "user", "content": "再见"},
-        {"role": "assistant", "content": "再见！"}
-    ]
-}
-{
-    "conversations": [
-        {"role": "system", "content": "# Tools ...", "tools": "[...]"},
-        {"role": "user", "content": "把'你好世界'翻译成english"},
-        {"role": "assistant", "content": "", "tool_calls": "[{\"name\":\"translate_text\",\"arguments\":{\"text\":\"你好世界\",\"target_language\":\"english\"}}]"},
-        {"role": "tool", "content": "{\"translated_text\":\"Hello World\"}"},
-        {"role": "assistant", "content": "Hello World"}
-    ]
+"conversations": [
+"Hello!" },
+"Goodbye!" }
+]
 }
 ```
 
-It is recommended to save these data sets to the directory `./data`
+It is recommended to place the dataset in the `./dataset` directory.
 
+### Step 3: Pre-training
 
-
-## Step 3: Preprocess the dataset
-
-Navigate to the project root directory and run the following script:
+1. Generate the configuration file (or directly edit `config.json`):
 
 ```bash
-python scripts/data_tokenize.py --tokenizer_path "./model/minimind" --data_path "./data/pretrain.jsonl" --train_output_path "./data/train_dataset.bin" --valid_output_path "./data/valid_dataset.bin" --train_ratio 0.95 --chunk_size 2000
+python scripts/get_config.py
 ```
 
-
-
-## Step 4: Pre-training
-
-Edit the parameters you need to use in `config.json`, you can generate the file by:
+2. Run the training script. The data path, model save directory, and the ratio of training/validation are passed as command-line parameters:
 
 ```bash
-python scripts/generate_config.py
+python trainer/train_pretrain.py \
+--config ./config.json \
+--data_path ./dataset/full/pretrain_t2t.jsonl \
+--save_model_dir ./output/new_pretrain \
+--train_ratio 0.95
 ```
 
-Configure your wandb:
+- After training is interrupted, you can resume training using `config.json`'s `training.use_checkpoint` / `training.from_checkpoint` (the checkpoint contains the model, optimizer, GradScaler, and complete RNG state);
+- If `training.use_wandb` is enabled, please first execute `wandb login`.
+
+3. Test the generated results (specify the weight file with `--model`, and the number of steps is reflected in the file name):
 
 ```bash
-wandb login
+python tests/test_pretrain_lm.py --model ./model/new_pretrain/pretrain_lm_XXXX.pt
 ```
 
-Run the training script:
+> Note: During pre-training, each sequence starts with `
 
 ```bash
-python scripts/train_lm.py --config config.json
+python scripts/get_pretrain_model_from_cpt.py \
+--checkpoint ./output/new_pretrain/checkpoint.pt \
+--output ./model/new_pretrain
 ```
 
-You can test your model by:
+### Step 4: Model Evaluation
+
+- Perplexity Evaluation: Traverse all the weights in the model directory and provide the average loss / perplexity along with a significance test:
 
 ```bash
-python tests/test_lm.py
+python scripts/eval_perplexity.py
 ```
 
-
-
-## Step 5: SFT
-
-Run the script:
+- Generative evaluation on the self-built prompt test set: Generate and save complete outputs for each question, facilitating manual interpretation:
 
 ```bash
-python scripts/train_lm.py --config config.json
+python scripts/eval_generation.py
 ```
 
-Also, you can test your model by:
+### Step 5: SFT and DPO
 
-```bash
-python tests/test_sft_lm.py
-```
+The training scripts for SFT and DPO are located in the `legacy/main` branch. Currently, this branch does not include the corresponding implementations.
+
