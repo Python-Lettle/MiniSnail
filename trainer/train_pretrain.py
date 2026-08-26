@@ -238,7 +238,7 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
                         # 随机采样 valid 样本，避免固定取数据集开头造成的偏置
                         # 注意: 索引范围是 dataset 样本数, 而不是 dataloader 的 batch 数
                         num_val_samples = len(val_dataloader.dataset)
-                        valid_indices = random.sample(range(num_val_samples), min(20, num_val_samples))
+                        valid_indices = random.sample(range(num_val_samples), min(config.training.valid_batches, num_val_samples))
                         for vi in valid_indices:
                             inputs_val, targets_val = val_dataloader.dataset[vi]
                             inputs_val, targets_val = inputs_val.unsqueeze(0).to(model.device), targets_val.unsqueeze(0).to(model.device)

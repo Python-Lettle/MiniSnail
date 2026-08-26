@@ -32,6 +32,7 @@ class TrainingConfig:
     weight_decay: float = 0.001
     dpo_beta: float = 0.1
     valid_interval: int = 400
+    valid_batches: int = 20
     gradient_clip: float = 1.0
     accumulation_steps: int = 1
     print_interval: int = 200
