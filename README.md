@@ -13,10 +13,10 @@ MiniSnail 是一个轻量级语言模型项目，目标是**用远少于大型�
 ## 项目进展
 
 ```
-Raw Data -> MiniMind Tokenizer   (vocab_size = 6400)
-         -> Pre-training         (已完成)
-         -> SFT                  (见 legacy/main 分支)
-         -> DPO                  (见 legacy/main 分支)
+Raw   Data -> MiniMind Tokenizer   (vocab_size = 6400)
+JSONL Data -> Pre-training         (已完成)
+           -> SFT                  (见 legacy/main 分支)
+           -> DPO                  (见 legacy/main 分支)
 ```
 
 > 预训练相关代码与工具位于本仓库 `main` 分支；SFT 与 DPO 的训练脚本在 `legacy/main` 分支。
