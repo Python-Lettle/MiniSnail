@@ -38,6 +38,40 @@ def get_dataloader(
     )
     return dataloader
 
+def get_epoch_dataloader(
+    dataset: Dataset,
+    batch_size: int = 32,
+    seed: int = 42,
+    epoch: int = 0,
+    skip_batches: int = 0,
+    pin_memory: bool = True,
+):
+    """
+    构建指定 epoch 的确定性洗牌 dataloader (断点续训用)。
+    每个 epoch 用独立 seed (seed * 1000003 + epoch) 生成固定排列, 同一 (seed, epoch)
+    在重启/续训时得到完全一致的 batch 顺序, 因此可按 skip_batches 精确跳过已完成的 batch,
+    既不重复训练也不漏数据。不丢弃尾部不满 batch (drop_last=False, 与预训练 train loader 一致)。
+    """
+    if sys.platform == 'win32':
+        num_workers = 0
+    else:
+        num_workers = max(1, (os.cpu_count() or 4) // 2)
+
+    g = torch.Generator()
+    g.manual_seed(seed * 1000003 + epoch)
+    perm = torch.randperm(len(dataset), generator=g).tolist()
+    batches = [perm[i:i + batch_size] for i in range(0, len(perm), batch_size)]
+    if skip_batches > 0:
+        batches = batches[skip_batches:]
+    console.print(f"[DataLoader] epoch={epoch}, num_samples={len(dataset)}, "
+                  f"skip_batches={skip_batches}, remaining_batches={len(batches)}, num_workers={num_workers}")
+    return DataLoader(
+        dataset,
+        batch_sampler=batches,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+
 # ---------- 编码工具 ----------
 def encode_text(tokenizer: PreTrainedTokenizer, text: str, max_length: int) -> tuple[torch.Tensor, torch.Tensor]:
     """

@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from torch.optim import Optimizer
 import torch.nn.functional as F
 
-from minisnail.dataset import LazyPretrainDataset, get_dataloader, load_line_offsets
+from minisnail.dataset import LazyPretrainDataset, get_dataloader, get_epoch_dataloader, load_line_offsets
 from minisnail.functions import cosine_schedule, gradient_clipping
 from minisnail.tokenizer import get_tokenizer
 from minisnail.config import SnailConfig
@@ -40,8 +40,8 @@ def save_checkpoint(
         scaler (torch.amp.GradScaler): Serialize the state of this gradient scaler.
         global_step (int): Serialize this value, which represents the number of training iterations
             we've completed.
-        epoch (int): Next epoch index to resume from (已完成 epoch 数).
-        step (int): Step index within the current epoch (保留字段, 恒为 0).
+        epoch (int): Index of the epoch the checkpoint was saved in (正在训练的 epoch).
+        step (int): Number of completed batches within that epoch (轮内续训时跳过的 batch 数).
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
     # 1. Prepare the file to save the checkpoint
@@ -113,12 +113,15 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
     epoch = start_epoch = 0
     global_step = 0
     optimizer_step = 0
+    start_step = 0
+    epoch_step = 0
     if checkpoint is not None:
-        # checkpoint 中 epoch 语义为"下一个待训练的 epoch"
-        # (shuffle 的 dataloader 无法对齐轮内 batch, 因此不做轮内恢复, 从下一轮开头继续)
+        # checkpoint 语义: epoch = 断点所在 (正在训练的) epoch, last_step = 该 epoch 内已完成的 batch 数
+        # 续训时按 (seed, epoch) 确定性重建同一 batch 顺序, 再跳过已完成的 last_step 个 batch
         start_epoch = checkpoint['epoch']
         global_step = checkpoint['global_step']
         optimizer_step = checkpoint['optimizer_step']
+        start_step = checkpoint.get('last_step', 0)
 
     # torch.compile 包装后的模型, 保存 state_dict 时使用原始模块, 避免键名带上 _orig_mod 前缀
     base_model = getattr(model, "_orig_mod", model)
@@ -159,19 +162,32 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
             has_pending_grads = False
             console.print("[yellow]Pending gradients updated")
         save_checkpoint(
-            base_model, optimizer, scaler, global_step, epoch, 0, optimizer_step, run,
+            base_model, optimizer, scaler, global_step, epoch, epoch_step, optimizer_step, run,
             os.path.join(save_model_dir, "checkpoint.pt"),
         )
         console.print(f"[green]Checkpoint saved to {save_model_dir} at global_step {global_step} / {total_steps}")
         console.print("="*50)
 
-    console.print(f"[blue]Training start at epoch {start_epoch}, global_step {global_step}")
+    console.print(f"[blue]Training start at epoch {start_epoch}, step {start_step}, global_step {global_step}")
     model.train()
     try:
         for epoch in range(start_epoch, config.training.epochs):
-            for step, (input_ids, labels) in enumerate(train_dataloader):
+            # 每个 epoch 用独立 seed 确定性洗牌, 续训时重建相同 batch 顺序并跳过已完成的 batch
+            skip = start_step if epoch == start_epoch else 0
+            # 先更新 epoch_step 再构建 loader: 若中断恰好发生在 loader 构造期间,
+            # 保存的 last_step 仍是本 epoch 的正确跳过值, 而不是上一轮的残留值
+            epoch_step = skip
+            epoch_loader = get_epoch_dataloader(
+                train_dataloader.dataset,
+                batch_size=train_dataloader.batch_size,
+                seed=config.system.seed,
+                epoch=epoch,
+                skip_batches=skip,
+            )
+            for step, (input_ids, labels) in enumerate(epoch_loader):
                 input_ids, labels = input_ids.to(model.device), labels.to(model.device)
                 global_step += 1
+                epoch_step += 1
 
                 with torch.autocast(device_type=model.device.type, dtype=amp_dtype, enabled=autocast_enabled):
                     logits = model(input_ids)
@@ -270,6 +286,8 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
 
         # 训练正常结束: flush 残余梯度, 保存最终模型和 checkpoint
         console.print(f"[green]Training finished at global_step {global_step} / {total_steps}")
+        epoch = config.training.epochs  # 标记全部 epoch 已完成, 续训时 range(epochs, epochs) 为空直接结束
+        epoch_step = 0
         save_and_exit()  # 先 flush 残余梯度并保存 checkpoint, 保证 model_final 与 checkpoint 权重一致
         torch.save(base_model.state_dict(), os.path.join(save_model_dir, "model_final.pt"))
 
