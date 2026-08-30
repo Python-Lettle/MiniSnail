@@ -1,5 +1,6 @@
 import os
 import sys
+import glob
 import json
 import numpy as np
 import torch
@@ -192,4 +193,78 @@ class LazyPretrainDataset(Dataset):
             raise ValueError(
                 f"{self.data_path} 第 {line_no} 行解析失败: {e!r}") from e
         return encode_text(self.tokenizer, text, self.max_length)
+
+
+# ---------- SFT ----------
+class SFTDataset(Dataset):
+    """
+    读取预处理好的定长 npy: sft_input_ids*.npy / sft_labels*.npy
+
+    两种构造方式:
+        SFTDataset(data_dir="dataset/full")                  # 目录下所有分片, 按文件名排序
+        SFTDataset(input_path="a.npy", labels_path="b.npy")  # 显式指定单对文件
+
+    关于 dtype:
+        npy 以 int16 落盘 (词表 6400, labels 的 -100 也落在 int16 范围内, 比 int32 省一半磁盘);
+        但 nn.Embedding 的索引与 F.cross_entropy 的 target 都只接受 Long/Int, int16 (short) 会直接
+        抛 RuntimeError, 所以 __getitem__ 出栈时必须转成 int64。dtype 参数只描述"落盘类型",
+        不影响返回张量的类型。
+    """
+    def __init__(self, input_path=None, labels_path=None, data_dir=None,
+                 dtype: torch.dtype = torch.int16, mmap: bool = True):
+        super().__init__()
+
+        if data_dir is not None:
+            id_files = sorted(glob.glob(os.path.join(data_dir, "sft_input_ids*.npy")))
+            lb_files = sorted(glob.glob(os.path.join(data_dir, "sft_labels*.npy")))
+        elif input_path is not None and labels_path is not None:
+            id_files, lb_files = [input_path], [labels_path]
+        else:
+            raise ValueError("SFTDataset 需要 data_dir, 或同时给出 input_path 与 labels_path")
+
+        if not id_files or not lb_files:
+            raise FileNotFoundError(
+                f"没有找到 sft_input_ids*.npy / sft_labels*.npy "
+                f"(data_dir={data_dir}, input_path={input_path})")
+        if len(id_files) != len(lb_files):
+            raise ValueError(
+                f"input_ids 分片 {len(id_files)} 个与 labels 分片 {len(lb_files)} 个不匹配")
+
+        # 只读 mmap: 训练侧不写回, 'r+' 反而要求文件可写且有误写风险
+        mode = "r" if mmap else None
+        self.input_ids = [np.load(p, mmap_mode=mode) for p in id_files]
+        self.labels = [np.load(p, mmap_mode=mode) for p in lb_files]
+
+        for i, (a, b) in enumerate(zip(self.input_ids, self.labels)):
+            if a.shape != b.shape:
+                raise ValueError(f"分片 {i} 形状不一致: {a.shape} vs {b.shape}")
+            if a.ndim != 2:
+                raise ValueError(f"分片 {i} 应为二维 (样本数, 序列长度), 实际 {a.shape}")
+            # labels 需要容纳 -100, 无符号类型会在落盘时静默溢出成大正数
+            if b.dtype.kind != "i":
+                raise ValueError(
+                    f"分片 {i} 的 labels dtype 为 {b.dtype}, 必须是有符号整型 (需容纳 -100)")
+
+        self.shard_files = list(zip(id_files, lb_files))
+        self.shard_sizes = [len(a) for a in self.input_ids]
+        # cum[i] = 前 i 个分片的样本总数, 用于把全局下标定位到分片
+        self.cum = np.cumsum([0] + self.shard_sizes)
+        self.total = int(self.cum[-1])
+        self.max_length = int(self.input_ids[0].shape[1])
+        self.dtype = dtype
+
+    def __len__(self):
+        return self.total
+
+    def __getitem__(self, index):
+        if index < 0:
+            index += self.total
+        shard = int(np.searchsorted(self.cum, index, side="right")) - 1
+        offset = index - int(self.cum[shard])
+        # astype 会把 memmap 行拷成常规 ndarray, 再交给 from_numpy 零拷贝包装
+        ids = np.asarray(self.input_ids[shard][offset]).astype(np.int64, copy=False)
+        labels = np.asarray(self.labels[shard][offset]).astype(np.int64, copy=False)
+        return torch.from_numpy(ids), torch.from_numpy(labels)
+
+
 

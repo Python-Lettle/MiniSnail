@@ -224,6 +224,7 @@ __marimo__/
 config.json
 wandb
 .vscode
+.workbuddy
 *.pt
 train_loss_curve.png
 valid_loss_curve.png

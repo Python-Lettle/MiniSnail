@@ -4,6 +4,7 @@ import os
 # 必须在 import torch 之前设置, setdefault 保证外部显式设置优先
 os.environ.setdefault("TRITON_CACHE_DIR", os.path.abspath("./.cache/triton"))
 os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", os.path.abspath("./.cache/inductor"))
+import json
 import time
 import wandb
 import random
@@ -13,11 +14,11 @@ import numpy as np
 from typing import IO, Any, BinaryIO
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.optim import Optimizer
 import torch.nn.functional as F
 
-from minisnail.dataset import LazyPretrainDataset, get_dataloader, get_epoch_dataloader, load_line_offsets
+from minisnail.dataset import SFTDataset, get_dataloader, get_epoch_dataloader
 from minisnail.functions import cosine_schedule, gradient_clipping
 from minisnail.tokenizer import get_tokenizer
 from minisnail.config import SnailConfig
@@ -99,10 +100,7 @@ def load_checkpoint(
     # Load the checkpoint from the file or object
     if isinstance(src, str) or isinstance(src, os.PathLike):
         src = open(src, 'rb')
-    # Load the model state from the checkpoint
-    # 注意: checkpoint 是从 GPU 模型保存的, 默认 map_location 会把张量加载回原设备(GPU),
-    # 导致续训时同时占用一份 checkpoint 权重+优化器状态和新建模型, 显存翻倍直至 OOM。
-    # 显式映射到 CPU, load_state_dict 会按需拷贝到模型所在设备。
+    # 显式映射到 CPU, 避免续训时 checkpoint 权重+优化器状态占用双份显存直至 OOM
     checkpoint = torch.load(src, map_location="cpu", weights_only=False)
 
     return checkpoint
@@ -166,6 +164,7 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
             optimizer.zero_grad()
             has_pending_grads = False
             console.print("[yellow]Pending gradients updated")
+        # 保存 checkpoint
         save_checkpoint(
             base_model, optimizer, scaler, global_step, epoch, epoch_step, optimizer_step, run,
             os.path.join(save_model_dir, "checkpoint.pt"),
@@ -246,6 +245,7 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
                     console.print(f"Step {global_step}/{total_steps}")
                     console.print(f"Optimizer Step: {optimizer_step}/{total_optimizer_steps}")
                     console.print(f"Loss: {loss.item():.4f}")
+                    console.print(f"LR: {current_lr:.2e}")
                     console.print(f"{config.training.print_interval} Steps completed")
                     console.print("="*50)
 
@@ -277,13 +277,13 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
                         is_min_loss = val_loss_mean < val_min_loss
                         if is_min_loss:
                             val_min_loss = val_loss_mean
-                            torch.save(base_model.state_dict(), os.path.join(save_model_dir, "model_best.pt"))
+                            torch.save(base_model.state_dict(), os.path.join(save_model_dir, "sft_best.pt"))
 
                         # Wandb logging
                         if run is not None:
                             run.log({
                                 "valid/loss": val_loss_mean,
-                            }, step=global_step)    
+                            }, step=global_step)
                     model.train()
 
             # Epoch end
@@ -293,8 +293,8 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
         console.print(f"[green]Training finished at global_step {global_step} / {total_steps}")
         epoch = config.training.epochs  # 标记全部 epoch 已完成, 续训时 range(epochs, epochs) 为空直接结束
         epoch_step = 0
-        save_and_exit()  # 先 flush 残余梯度并保存 checkpoint, 保证 model_final 与 checkpoint 权重一致
-        torch.save(base_model.state_dict(), os.path.join(save_model_dir, "model_final.pt"))
+        save_and_exit()  # 先 flush 残余梯度并保存 checkpoint,保证 sft_final 与 checkpoint 权重一致
+        torch.save(base_model.state_dict(), os.path.join(save_model_dir, "sft_final.pt"))
 
     except KeyboardInterrupt:
         # 手动中断: 保存断点以便续训
@@ -307,36 +307,69 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
         console.print(traceback.format_exc())
         save_and_exit()
 
-if __name__ == '__main__':
+def load_sft_meta(data_dir: str) -> dict | None:
+    """读取预处理产出的 sft_meta.json, 没有则返回 None。"""
+    path = os.path.join(data_dir, "sft_meta.json")
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='./config.json')
-    parser.add_argument('--data_path', type=str, default='./dataset/full/pretrain_t2t.jsonl')
-    parser.add_argument('--save_model_dir', type=str, default='./output/new_pretrain')
-    parser.add_argument('--train_ratio', type=float, default=0.95)
-    args = parser.parse_args()
-    
+    parser.add_argument('--data_dir', type=str, default='./dataset/full',
+                        help='经过预处理后数据的目录 (含 sft_input_ids*.npy 与 sft_labels*.npy)')
+    parser.add_argument('--save_model_dir', type=str, default='./output/new_sft')
+    parser.add_argument('--valid_ratio', type=float, default=0.005,
+                        help='验证集占比 (从数据集中按固定 seed 划分)')
+    parser.add_argument('--max_samples', type=int, default=None,
+                        help='只用前 N 条样本 (调试用, 不限制则跑全量)')
+    return parser.parse_args()
+
+if __name__ == '__main__':
+    args = parse_args()
+
     # 加载 config 和 tokenizer
     config = SnailConfig.from_json(args.config)
     print_train_config(config)
     tokenizer = get_tokenizer(config)
     # 设置随机种子
     setup_seed(config.system.seed)
-    
-    # 加载数据 (懒加载: 只建行偏移索引, 不把全量文本读入内存)
-    # 首次运行扫描全文件建索引并缓存到 <data_path>.idx.npz, 之后秒级启动
-    # train/val 划分: 用固定 seed 对全量行号做 permutation 后按比例切分
-    # (固定 seed 保证重启/断点续训时划分完全一致, 验证集不会混入训练集)
-    num_lines = len(load_line_offsets(args.data_path))
-    split_index = int(num_lines * args.train_ratio)
-    perm = np.random.default_rng(config.system.seed).permutation(num_lines)
-    train_indices, val_indices = perm[:split_index], perm[split_index:]
 
-    train_dataset = LazyPretrainDataset(
-        data_path=args.data_path,
-        tokenizer=tokenizer,
-        max_length=config.model.context_length,
-        indices=train_indices,
-    )
+    if config.training.from_weight is None:
+        console.print("[red]training.from_weight 为空, 将从随机初始化开始 SFT (通常应指向预训练权重)")
+
+    # 加载数据 (mmap 读 npy, 不把全量矩阵读进物理内存)
+    # 全量约 500 万条 x 512, int16 单份就 5GB+, 直接 np.load 常驻内存会挤爆
+    full_dataset = SFTDataset(data_dir=args.data_dir)
+
+    meta = load_sft_meta(args.data_dir)
+    if meta is not None:
+        console.print(f"[Data] 预处理: 输入 {meta.get('total_input_samples')} 条 -> 保留 "
+                      f"{meta.get('num_samples')} 条 | 分片 {meta.get('num_shards')} 个 | "
+                      f"dtype={meta.get('dtype')}")
+        console.print(f"[Data] 丢弃统计: {meta.get('stats')}")
+    if full_dataset.max_length != config.model.context_length:
+        console.print(f"[red]npy 序列长度 {full_dataset.max_length} 与 "
+                      f"config.model.context_length={config.model.context_length} 不一致, "
+                      f"请确认预处理用的 --max_length 与 config.json 是同一套")
+
+    # train/val 划分: 用固定 seed 对全量样本做 permutation 后按比例切分
+    # (固定 seed 保证重启/断点续训时划分完全一致, 验证集不会混入训练集)
+    n_total = len(full_dataset)
+    if args.max_samples:
+        n_total = min(n_total, int(args.max_samples))
+    valid_size = max(1, int(n_total * args.valid_ratio))
+    if valid_size >= n_total:
+        raise SystemExit(
+            f"[error] 验证集 {valid_size} 条 >= 可用样本 {n_total} 条, 请调小 --valid_ratio")
+    perm = np.random.default_rng(config.system.seed).permutation(n_total)
+    val_indices, train_indices = perm[:valid_size], perm[valid_size:]
+
+    train_dataset = Subset(full_dataset, train_indices.tolist())
+    val_dataset = Subset(full_dataset, val_indices.tolist())
+    console.print(f"[Data] 总样本 {n_total} -> 训练 {len(train_dataset)}, 验证 {len(val_dataset)}")
 
     train_dataloader = get_dataloader(
         dataset=train_dataset,
@@ -345,20 +378,13 @@ if __name__ == '__main__':
         drop_last=False,
     )
 
-    val_dataset = LazyPretrainDataset(
-        data_path=args.data_path,
-        tokenizer=tokenizer,
-        max_length=config.model.context_length,
-        indices=val_indices,
-    )
-    
     val_dataloader = get_dataloader(
         dataset=val_dataset,
         batch_size=config.training.batch_size,
         shuffle=False,
         drop_last=True,
     )
-    
+
     # 尝试加载断点
     checkpoint = None
     if config.training.use_checkpoint:
@@ -399,7 +425,7 @@ if __name__ == '__main__':
             )
             console.print(f"Started new training, id: {run.id}")
 
-    # 加载模型 (默认从 config.training.from_weight 加载)
+    # 加载模型 (默认从 config.training.from_weight 加载预训练权重)
     model = init_model(config, model_path=config.training.from_weight)
     if checkpoint is not None:
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -416,14 +442,13 @@ if __name__ == '__main__':
             console.print("[green]Model compiled successfully")
         except Exception as e:
             console.print(f"[yellow]torch.compile 不可用, 回退 eager 模式: {type(e).__name__}: {e}")
-    
-    # 加载 Tokenizer & 优化器
-    tokenizer = get_tokenizer(config)
+
+    # 优化器
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.lr, betas=config.training.betas, weight_decay=config.training.weight_decay)
     if checkpoint is not None:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         console.print(f"[green]Loaded optimizer state from checkpoint")
-    
+
     # 开始训练
     os.makedirs(args.save_model_dir, exist_ok=True)
     start_time = time.time()
@@ -435,4 +460,3 @@ if __name__ == '__main__':
 
     if run is not None:
         run.finish()
-    
