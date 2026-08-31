@@ -229,6 +229,10 @@ wandb
 train_loss_curve.png
 valid_loss_curve.png
 
+filter_words.txt
+replace_rules.json
+sft_meta.json
+
 *.jsonl
 
 eval/
