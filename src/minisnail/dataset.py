@@ -46,6 +46,7 @@ def get_epoch_dataloader(
     epoch: int = 0,
     skip_batches: int = 0,
     pin_memory: bool = True,
+    collate_fn=None,
 ):
     """
     构建指定 epoch 的确定性洗牌 dataloader (断点续训用)。
@@ -71,6 +72,7 @@ def get_epoch_dataloader(
         batch_sampler=batches,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        collate_fn=collate_fn,
     )
 
 # ---------- 编码工具 ----------
@@ -266,5 +268,69 @@ class SFTDataset(Dataset):
         labels = np.asarray(self.labels[shard][offset]).astype(np.int64, copy=False)
         return torch.from_numpy(ids), torch.from_numpy(labels)
 
+# ---------- DPO Dataset ----------
+class DPODataset(Dataset):
+
+    def __init__(self, path, tokenizer, max_length):
+        self.items = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                self.items.append(json.loads(line))
+
+        self.tokenizer=tokenizer
+        self.max_length=max_length
+
+    def __len__(self):
+        return len(self.items)
+
+    def encode_chat(self, messages):
+        """
+        手动渲染模板 (与 model.chat / SFT 预处理一致, 不带 think 块):
+            <|im_start|>role\n{content}<|im_end|>\n
+
+        prompt     = 除最后一条 assistant 外的全部消息 + <|im_start|>assistant\n
+        completion = 最后一条 assistant 的正文 + <|im_end|> (生成到此停止, 不含尾随换行)
+
+        prompt / completion 分别编码后再拼接:
+        1. tokenizer 自带的 chat_template 是 Qwen3 风格, 会插入 <|im_start|>assistant\n<|think|>...
+           与 SFT 训练/推理格式不一致, 偏好无法迁移到 model.chat 推理端;
+        2. 分别编码保证 full_ids 恰为 prompt_ids + completion_ids, mask 边界与 token 严格对齐
+           (两段拼接文本分别整体 tokenize, 不存在句中/句尾 BPE 切分差异导致的边界漂移)。
+        """
+        prompt_text = ""
+        for message in messages[:-1]:
+            prompt_text += f"<|im_start|>{message['role']}\n{message['content']}<|im_end|>\n"
+        prompt_text += "<|im_start|>assistant\n"
+        completion_text = f"{messages[-1]['content']}<|im_end|>"
+
+        prompt_ids = self.tokenizer(prompt_text, add_special_tokens=False)['input_ids']
+        completion_ids = self.tokenizer(completion_text, add_special_tokens=False)['input_ids']
+
+        full_ids = prompt_ids + completion_ids
+        mask = [0] * len(prompt_ids) + [1] * len(completion_ids)
+
+        # 超长保留末尾 (与 SFT 预处理约定一致): 保住 assistant 回复与 <|im_end|>,
+        # 从左侧截掉 prompt 头部; completion 在序列末尾因此总是完整保留
+        if len(full_ids) > self.max_length:
+            full_ids = full_ids[-self.max_length:]
+            mask = mask[-self.max_length:]
+
+        return (
+            torch.tensor(full_ids, dtype=torch.long),
+            torch.tensor(mask, dtype=torch.long),
+        )
 
 
+
+    def __getitem__(self,index):
+        item = self.items[index]
+
+        chosen_ids,chosen_mask = self.encode_chat(item["chosen"])
+        rejected_ids,rejected_mask = self.encode_chat(item["rejected"])
+
+        return {
+            "chosen_ids" : chosen_ids,
+            "chosen_mask" : chosen_mask,
+            "rejected_ids" : rejected_ids,
+            "rejected_mask" : rejected_mask
+        }

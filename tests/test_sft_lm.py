@@ -161,9 +161,9 @@ if __name__ == '__main__':
     except AttributeError:
         pass
 
-    parser = argparse.ArgumentParser(description='Test SFT-trained model with chat template.')
-    parser.add_argument('--model', type=str, default='./model/new_sft/sft_final.pt',
-                        help='Path to the SFT model weight file.')
+    parser = argparse.ArgumentParser(description='Test model with chat template.')
+    parser.add_argument('--model', type=str, default='./model/new_dpo/dpo_new.pt',
+                        help='Path to the model weight file.')
     parser.add_argument('--eval_dir', type=str, default=None,
                         help='批量评测目录: 遍历 <dir>/sft_*.pt 并逐一对话评测对比.')
     parser.add_argument('--config', type=str, default='./config.json', help='Path to config JSON file.')
