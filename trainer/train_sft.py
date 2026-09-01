@@ -1,5 +1,5 @@
 import os
-# torch.compile: 默认缓存目录 (~/.triton 与 %TEMP%\torchinductor_*) 在 TRAE 沙箱内
+# torch.compile: 默认缓存目录 (~/.triton 与 %TEMP%\torchinductor_*) 
 # 会被拦截 (PermissionError: WinError 5), 指到项目目录规避;
 # 必须在 import torch 之前设置, setdefault 保证外部显式设置优先
 os.environ.setdefault("TRITON_CACHE_DIR", os.path.abspath("./.cache/triton"))
