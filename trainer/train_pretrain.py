@@ -21,7 +21,7 @@ from minisnail.dataset import LazyPretrainDataset, get_dataloader, get_epoch_dat
 from minisnail.functions import cosine_schedule, gradient_clipping
 from minisnail.tokenizer import get_tokenizer
 from minisnail.config import SnailConfig
-from minisnail.util import setup_seed, print_train_config
+from minisnail.util import setup_seed, load_config, print_train_config
 from minisnail.debug import console
 from minisnail.model import init_model
 
@@ -316,7 +316,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     # 加载 config 和 tokenizer
-    config = SnailConfig.from_json(args.config)
+    config = load_config(args)
     print_train_config(config)
     tokenizer = get_tokenizer(config)
     # 设置随机种子
