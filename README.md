@@ -15,11 +15,9 @@ MiniSnail 是一个轻量级语言模型项目，目标是**用远少于大型�
 ```
 Raw   Data -> MiniMind Tokenizer   (vocab_size = 6400)
 JSONL Data -> Pre-training         (已完成)
-           -> SFT                  (见 legacy/main 分支)
-           -> DPO                  (见 legacy/main 分支)
+           -> SFT                  (已完成)
+           -> DPO                  (进行中)
 ```
-
-> 预训练相关代码与工具位于本仓库 `main` 分支；SFT 与 DPO 的训练脚本在 `legacy/main` 分支。
 
 ## 快速开始
 
@@ -62,6 +60,15 @@ SFT 数据为对话格式：
         {"role": "user", "content": "再见"},
         {"role": "assistant", "content": "再见！"}
     ]
+}
+```
+
+DPO 数据每行一条偏好样本（`chosen` 与 `rejected` 共享相同的提问，仅回复不同）：
+
+```json
+{
+    "chosen":   [{"role": "user", "content": "问题"}, {"role": "assistant", "content": "更好的回复"}],
+    "rejected": [{"role": "user", "content": "问题"}, {"role": "assistant", "content": "更差的回复"}]
 }
 ```
 
@@ -120,4 +127,35 @@ python scripts/eval_generation.py
 
 ### Step 5：SFT 与 DPO
 
-SFT 与 DPO 的训练脚本位于 `legacy/main` 分支，本分支暂不包含对应实现。
+**SFT** 需先对对话数据做预处理，将变长对话编码为定长 int16 分片（训练时 mmap 读取，不整读进内存）：
+
+```bash
+python scripts/preprocess_sft_data.py \
+    --data_path ./dataset/full/sft_t2t.jsonl \
+    --output_dir ./dataset/full
+```
+
+训练时通过 `--data_dir` 指定分片目录，`training.from_weight` 应指向预训练导出的权重：
+
+```bash
+python trainer/train_sft.py \
+    --config ./config.json \
+    --data_dir ./dataset/full \
+    --save_model_dir ./output/new_sft \
+    --valid_ratio 0.005
+```
+
+训练产物：`sft_best.pt`（验证集 loss 最低）与 `sft_final.pt`（训练结束权重）。
+
+**DPO** 以 SFT 模型为基座（`training.from_weight` 指向 `sft_final.pt`），loss 初始值应接近 ln(2) ≈ 0.693（policy 与 reference 初始权重相同），训练中 margin 由负转正、accuracy 缓慢上升即正常：
+
+```bash
+python trainer/train_dpo.py \
+    --config ./config.json \
+    --data_path ./dataset/dpo.jsonl \
+    --save_model_dir ./output/new_dpo
+```
+
+训练产物：`dpo_new.pt`。
+
+> SFT 与 DPO 的断点续训方式与预训练一致：通过 `config.json` 中的 `training.use_checkpoint` / `training.from_checkpoint` 恢复（checkpoint 内含双模型/优化器/GradScaler 及完整 RNG 状态）。

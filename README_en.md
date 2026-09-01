@@ -15,11 +15,9 @@ MiniSnail is a lightweight language model project. Its goal is to **simulate the
 ```
 Raw   Data -> MiniMind Tokenizer   (vocab_size = 6400)
 JSONL Data -> Pre-training         (Completed)
-           -> SFT                  (See the legacy/main branch)
-           -> DPO                  (See the legacy/main branch)
+           -> SFT                  (Completed)
+           -> DPO                  (In progress)
 ```
-
-> Pre-training related code and tools live in the `main` branch of this repository; the training scripts for SFT and DPO are in the `legacy/main` branch.
 
 ## Quick Start
 
@@ -62,6 +60,15 @@ SFT data follows a conversation format:
         {"role": "user", "content": "再见"},
         {"role": "assistant", "content": "再见！"}
     ]
+}
+```
+
+DPO data contains one preference sample per line (`chosen` and `rejected` share the same prompt, differing only in the response):
+
+```json
+{
+    "chosen":   [{"role": "user", "content": "Question"}, {"role": "assistant", "content": "Better response"}],
+    "rejected": [{"role": "user", "content": "Question"}, {"role": "assistant", "content": "Worse response"}]
 }
 ```
 
@@ -120,4 +127,35 @@ python scripts/eval_generation.py
 
 ### Step 5: SFT and DPO
 
-The training scripts for SFT and DPO live in the `legacy/main` branch; this branch does not include them yet.
+**SFT** requires preprocessing the conversation data first, encoding variable-length conversations into fixed-length int16 shards (read via mmap during training, not fully loaded into memory):
+
+```bash
+python scripts/preprocess_sft_data.py \
+    --data_path ./dataset/full/sft_t2t.jsonl \
+    --output_dir ./dataset/full
+```
+
+For training, pass the shard directory via `--data_dir`; `training.from_weight` should point to the exported pre-training weights:
+
+```bash
+python trainer/train_sft.py \
+    --config ./config.json \
+    --data_dir ./dataset/full \
+    --save_model_dir ./output/new_sft \
+    --valid_ratio 0.005
+```
+
+Outputs: `sft_best.pt` (lowest validation loss) and `sft_final.pt` (final weights).
+
+**DPO** uses the SFT model as its base (`training.from_weight` points to `sft_final.pt`). The initial loss should be close to ln(2) ≈ 0.693 (policy and reference start with identical weights); during training, the margin turning from negative to positive and accuracy rising slowly indicate normal progress:
+
+```bash
+python trainer/train_dpo.py \
+    --config ./config.json \
+    --data_path ./dataset/dpo.jsonl \
+    --save_model_dir ./output/new_dpo
+```
+
+Output: `dpo_new.pt`.
+
+> Checkpoint resume for SFT and DPO works the same way as pre-training: restore via `training.use_checkpoint` / `training.from_checkpoint` in `config.json` (the checkpoint contains the dual models, optimizer, GradScaler, and the complete RNG state).
