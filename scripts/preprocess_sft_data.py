@@ -235,9 +235,13 @@ def build_sample(messages, tokenizer, max_length, replace_rules=None, filter_wor
         sep_ids = [] if not input_ids else tokenizer("\n", add_special_tokens=False).input_ids
 
         ids = sep_ids + body_ids
-        # ids 过长则丢弃
+        # 单条消息已超出整个上下文窗口时，必须丢弃整条对话。
+        # 如果只跳过当前消息，后续 assistant 回复会在缺少对应 prompt 的
+        # 情况下进入训练集，导致样本语义错位。
         if len(ids) > max_length:
-            continue
+            if stats is not None:
+                stats["too_long"] += 1
+            return None, None
 
         # 逐条累加后超预算则整条样本丢弃。
         # 不能只丢当前消息后继续: 一是丢掉 assistant 会留下 labels 全 -100 的空样本,
