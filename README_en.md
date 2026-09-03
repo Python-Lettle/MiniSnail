@@ -111,14 +111,13 @@ SFT supervises only assistant content and `<|im_end|>`; message headers, separat
 python scripts/get_config.py
 ```
 
-2. Run the training script. The data path, the model save directory, and the train/validation split ratio are passed as command-line arguments:
+2. Run the training script. Pass the data path and model save directory on the command line; set the fixed validation-set size with `training.valid_samples` in `config.json`:
 
 ```bash
 python trainer/train_pretrain.py \
     --config ./config.json \
     --data_path ./dataset/full/pretrain_t2t.jsonl \
-    --save_model_dir ./output/new_pretrain \
-    --train_ratio 0.95
+    --save_model_dir ./output/new_pretrain
 ```
 
 - After an interruption, you can resume training via `training.use_checkpoint` / `training.from_checkpoint` in `config.json` (the checkpoint contains the model, optimizer, GradScaler, and the complete RNG state);
@@ -153,9 +152,7 @@ python scripts/eval_perplexity.py \
     --config ./model/new_pretrain/config.json \
     --data_path ./dataset/full/pretrain_t2t.jsonl \
     --models_dir ./model/new_pretrain \
-    --pattern "pretrain_lm_*.pt" \
-    --train_ratio 0.95 \
-    --num_samples 5000
+    --pattern "pretrain_lm_*.pt"
 
 # 3. Pre-training continuation smoke test
 python scripts/eval_generation.py \
@@ -172,13 +169,13 @@ python scripts/eval_generation.py \
 # 5. DPO preference improvement on a never-trained-on holdout file
 python scripts/eval_preference.py \
     --config ./model/new_dpo/config.json \
-    --data_path ./dataset/dpo_valid.jsonl \
+    --data_path ./dataset/dpo_eval.jsonl \
     --model_path ./model/new_dpo/dpo_new.pt \
     --reference_model_path ./model/new_sft/sft_final.pt \
     --num_samples 2000
 ```
 
-Perplexity is token-weighted and is comparable only with the same tokenizer and validation data. Generation output reports a reference-hit smoke metric and EOS stop rate; it is not a public benchmark score. The preference report includes DPO accuracy, implicit reward margin, raw chosen win rates, and a length-normalized diagnostic. Never report DPO metrics measured on its training file.
+Perplexity is token-weighted and is comparable only with the same tokenizer and validation data. Generation output reports a reference-hit smoke metric and EOS stop rate; it is not a public benchmark score. The preference report includes DPO accuracy, implicit reward margin, raw chosen win rates, and a length-normalized diagnostic. Run `python scripts/create_dpo_eval.py` to create a deterministic 2,000-pair workflow sample. If its source file was already used for training, it is only a smoke-test set; a reportable holdout must be split before training and excluded from the training file.
 
 ### Step 5: SFT and DPO
 
@@ -199,9 +196,10 @@ For training, pass the shard directory via `--data_dir`; `training.from_weight` 
 python trainer/train_sft.py \
     --config ./config.json \
     --data_dir ./dataset/full \
-    --save_model_dir ./output/new_sft \
-    --valid_ratio 0.005
+    --save_model_dir ./output/new_sft
 ```
+
+Both pre-training and SFT deterministically select `training.valid_samples` validation examples using `system.seed`, then reuse the complete fixed set at every validation point.
 
 Outputs: `sft_best.pt` (lowest validation loss) and `sft_final.pt` (final weights).
 

@@ -10,6 +10,27 @@ from transformers import PreTrainedTokenizer
 from minisnail.debug import console
 from minisnail.chat_protocol import encode_assistant_completion, encode_chat_prompt
 
+
+def split_train_validation_indices(
+    num_samples: int,
+    valid_samples: int,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """按固定 seed 划出指定数量的验证样本，返回 (train, validation) 下标。"""
+    if num_samples < 2:
+        raise ValueError("数据集至少需要 2 条样本才能划分训练集和验证集")
+    if valid_samples <= 0:
+        raise ValueError("training.valid_samples 必须大于 0")
+    if valid_samples >= num_samples:
+        raise ValueError(
+            f"training.valid_samples={valid_samples} 必须小于数据集样本数 {num_samples}"
+        )
+
+    permutation = np.random.default_rng(seed).permutation(num_samples)
+    validation_indices = permutation[:valid_samples]
+    train_indices = permutation[valid_samples:]
+    return train_indices, validation_indices
+
 def get_dataloader(
     dataset: Dataset,
     batch_size: int = 32,

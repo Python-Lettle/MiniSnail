@@ -17,7 +17,13 @@ from torch.utils.data import DataLoader
 from torch.optim import Optimizer
 import torch.nn.functional as F
 
-from minisnail.dataset import LazyPretrainDataset, get_dataloader, get_epoch_dataloader, load_line_offsets
+from minisnail.dataset import (
+    LazyPretrainDataset,
+    get_dataloader,
+    get_epoch_dataloader,
+    load_line_offsets,
+    split_train_validation_indices,
+)
 from minisnail.functions import apply_optimizer_step
 from minisnail.tokenizer import get_tokenizer
 from minisnail.config import SnailConfig
@@ -267,23 +273,27 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
                 if global_step % config.training.valid_interval == 0:
                     model.eval()
                     with torch.no_grad():
-                        val_losses = []
-                        # 随机采样 valid 样本，避免固定取数据集开头造成的偏置
-                        # 注意: 索引范围是 dataset 样本数, 而不是 dataloader 的 batch 数
-                        num_val_samples = len(val_dataloader.dataset)
-                        valid_indices = random.sample(range(num_val_samples), min(config.training.valid_batches, num_val_samples))
-                        for vi in valid_indices:
-                            inputs_val, targets_val = val_dataloader.dataset[vi]
-                            inputs_val, targets_val = inputs_val.unsqueeze(0).to(model.device), targets_val.unsqueeze(0).to(model.device)
+                        total_val_nll = 0.0
+                        total_val_tokens = 0
+                        # val_dataloader 在启动时已经由固定 seed 和 valid_samples
+                        # 确定；每次验证完整遍历同一批样本，保证不同 step 可比较。
+                        for inputs_val, targets_val in val_dataloader:
+                            inputs_val = inputs_val.to(model.device)
+                            targets_val = targets_val.to(model.device)
                             with torch.autocast(device_type=model.device.type, dtype=amp_dtype, enabled=autocast_enabled):
                                 val_logits = model(inputs_val)
-                                val_loss = F.cross_entropy(
+                                val_nll = F.cross_entropy(
                                     val_logits[:, :-1].contiguous().view(-1, config.model.vocab_size),
                                     targets_val[:, 1:].contiguous().view(-1),
-                                    ignore_index=-100
+                                    ignore_index=-100,
+                                    reduction="sum",
                                 )
-                            val_losses.append(val_loss.item())
-                        val_loss_mean = np.mean(val_losses)
+                            valid_tokens = (targets_val[:, 1:] != -100).sum().item()
+                            total_val_nll += val_nll.item()
+                            total_val_tokens += valid_tokens
+                        if total_val_tokens == 0:
+                            raise RuntimeError("固定验证集中没有可计算 loss 的 token")
+                        val_loss_mean = total_val_nll / total_val_tokens
                         # 更新 val_min_loss
                         console.print(f"VALID mean loss: {val_loss_mean:.4f}")
                         is_min_loss = val_loss_mean < val_min_loss
@@ -325,7 +335,6 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, default='./config.json')
     parser.add_argument('--data_path', type=str, default='./dataset/full/pretrain_t2t.jsonl')
     parser.add_argument('--save_model_dir', type=str, default='./output/new_pretrain')
-    parser.add_argument('--train_ratio', type=float, default=0.95)
     args = parser.parse_args()
     
     # 加载 config 和 tokenizer
@@ -337,12 +346,17 @@ if __name__ == '__main__':
     
     # 加载数据 (懒加载: 只建行偏移索引, 不把全量文本读入内存)
     # 首次运行扫描全文件建索引并缓存到 <data_path>.idx.npz, 之后秒级启动
-    # train/val 划分: 用固定 seed 对全量行号做 permutation 后按比例切分
-    # (固定 seed 保证重启/断点续训时划分完全一致, 验证集不会混入训练集)
+    # train/val 划分: 用固定 seed 划出配置指定数量的验证样本。
+    # 同一份数据、seed 和 valid_samples 会得到完全一致的验证集。
     num_lines = len(load_line_offsets(args.data_path))
-    split_index = int(num_lines * args.train_ratio)
-    perm = np.random.default_rng(config.system.seed).permutation(num_lines)
-    train_indices, val_indices = perm[:split_index], perm[split_index:]
+    try:
+        train_indices, val_indices = split_train_validation_indices(
+            num_lines,
+            config.training.valid_samples,
+            config.system.seed,
+        )
+    except ValueError as e:
+        raise SystemExit(f"[error] {e}") from e
 
     train_dataset = LazyPretrainDataset(
         data_path=args.data_path,
@@ -369,7 +383,7 @@ if __name__ == '__main__':
         dataset=val_dataset,
         batch_size=config.training.batch_size,
         shuffle=False,
-        drop_last=True,
+        drop_last=False,
     )
     
     # 尝试加载断点

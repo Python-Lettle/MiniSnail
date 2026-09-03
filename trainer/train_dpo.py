@@ -19,6 +19,7 @@ from minisnail.util import load_config, setup_seed, restore_rng_state
 from minisnail.dataset import DPODataset, get_epoch_dataloader
 from minisnail.tokenizer import get_tokenizer
 from minisnail.functions import apply_optimizer_step
+from minisnail.preference import get_sequence_logprob, dpo_loss, dpo_collate
 
 def save_checkpoint(
     policy_model: torch.nn.Module,
@@ -92,83 +93,6 @@ def load_checkpoint(
     checkpoint = torch.load(src, map_location="cpu", weights_only=False)
 
     return checkpoint
-
-def get_sequence_logprob(logits, labels, mask):
-    logits = logits[:,:-1,:]
-    labels = labels[:,1:]
-    mask = mask[:,1:].float()
-
-    log_probs = F.log_softmax(
-        logits.float(),
-        dim=-1
-    )
-    token_log_probs = torch.gather(
-        log_probs,
-        dim=-1,
-        index=labels.unsqueeze(-1)
-    ).squeeze(-1)
-
-    token_log_probs *= mask
-
-    # 序列 logprob 用求和 (标准 DPO / MiniMind 同款): 偏好信号是整段回复的
-    # 对数概率之差, 按长度取平均会把 gap 压小一个数量级, beta=0.1 下信号过弱
-    seq_log_probs = token_log_probs.sum(-1)
-
-    return seq_log_probs
-
-def dpo_loss(
-    policy_chosen,
-    policy_rejected,
-    ref_chosen,
-    ref_rejected,
-    beta
-):
-    policy_gap = policy_chosen - policy_rejected
-    ref_gap = ref_chosen - ref_rejected
-
-    logits = beta * (policy_gap - ref_gap)
-
-    loss = -F.logsigmoid(logits)
-    accuracy = (logits > 0).float().mean()
-
-    return loss.mean(), accuracy
-
-
-def dpo_collate(batch,pad_id):
-    chosen_ids=[x["chosen_ids"] for x in batch]
-    rejected_ids=[x["rejected_ids"] for x in batch]
-    chosen_mask=[x["chosen_mask"] for x in batch]
-    rejected_mask=[x["rejected_mask"] for x in batch]
-
-    chosen_ids=torch.nn.utils.rnn.pad_sequence(
-        chosen_ids,
-        batch_first=True,
-        padding_value=pad_id
-    )
-
-    rejected_ids=torch.nn.utils.rnn.pad_sequence(
-        rejected_ids,
-        batch_first=True,
-        padding_value=pad_id
-    )
-
-    chosen_mask=torch.nn.utils.rnn.pad_sequence(
-        chosen_mask,
-        batch_first=True,
-        padding_value=0
-    )
-    rejected_mask=torch.nn.utils.rnn.pad_sequence(
-        rejected_mask,
-        batch_first=True,
-        padding_value=0
-    )
-
-    return {
-        "chosen_ids":chosen_ids,
-        "chosen_mask":chosen_mask,
-        "rejected_ids":rejected_ids,
-        "rejected_mask":rejected_mask
-    }
 
 def train_dpo(config: SnailConfig, save_model_dir: str, run: wandb.Run, checkpoint: dict,
               policy_model: SnailModel, reference_model: SnailModel, optimizer: torch.optim.Optimizer,

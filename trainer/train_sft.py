@@ -18,7 +18,12 @@ from torch.utils.data import DataLoader, Subset
 from torch.optim import Optimizer
 import torch.nn.functional as F
 
-from minisnail.dataset import SFTDataset, get_dataloader, get_epoch_dataloader
+from minisnail.dataset import (
+    SFTDataset,
+    get_dataloader,
+    get_epoch_dataloader,
+    split_train_validation_indices,
+)
 from minisnail.functions import apply_optimizer_step
 from minisnail.chat_protocol import CHAT_PROTOCOL_VERSION
 from minisnail.tokenizer import get_tokenizer
@@ -254,23 +259,27 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
                 if global_step % config.training.valid_interval == 0:
                     model.eval()
                     with torch.no_grad():
-                        val_losses = []
-                        # 随机采样 valid 样本，避免固定取数据集开头造成的偏置
-                        # 注意: 索引范围是 dataset 样本数, 而不是 dataloader 的 batch 数
-                        num_val_samples = len(val_dataloader.dataset)
-                        valid_indices = random.sample(range(num_val_samples), min(config.training.valid_batches, num_val_samples))
-                        for vi in valid_indices:
-                            inputs_val, targets_val = val_dataloader.dataset[vi]
-                            inputs_val, targets_val = inputs_val.unsqueeze(0).to(model.device), targets_val.unsqueeze(0).to(model.device)
+                        total_val_nll = 0.0
+                        total_val_tokens = 0
+                        # val_dataloader 在启动时已经由固定 seed 和 valid_samples
+                        # 确定；每次验证完整遍历同一批样本，保证不同 step 可比较。
+                        for inputs_val, targets_val in val_dataloader:
+                            inputs_val = inputs_val.to(model.device)
+                            targets_val = targets_val.to(model.device)
                             with torch.autocast(device_type=model.device.type, dtype=amp_dtype, enabled=autocast_enabled):
                                 val_logits = model(inputs_val)
-                                val_loss = F.cross_entropy(
+                                val_nll = F.cross_entropy(
                                     val_logits[:, :-1].contiguous().view(-1, config.model.vocab_size),
                                     targets_val[:, 1:].contiguous().view(-1),
-                                    ignore_index=-100
+                                    ignore_index=-100,
+                                    reduction="sum",
                                 )
-                            val_losses.append(val_loss.item())
-                        val_loss_mean = np.mean(val_losses)
+                            valid_tokens = (targets_val[:, 1:] != -100).sum().item()
+                            total_val_nll += val_nll.item()
+                            total_val_tokens += valid_tokens
+                        if total_val_tokens == 0:
+                            raise RuntimeError("固定验证集中没有可计算 loss 的 token")
+                        val_loss_mean = total_val_nll / total_val_tokens
                         # 更新 val_min_loss
                         console.print(f"VALID mean loss: {val_loss_mean:.4f}")
                         is_min_loss = val_loss_mean < val_min_loss
@@ -341,8 +350,6 @@ def parse_args():
     parser.add_argument('--data_dir', type=str, default='./dataset/full',
                         help='经过预处理后数据的目录 (含 sft_input_ids*.npy 与 sft_labels*.npy)')
     parser.add_argument('--save_model_dir', type=str, default='./output/new_sft')
-    parser.add_argument('--valid_ratio', type=float, default=0.005,
-                        help='验证集占比 (从数据集中按固定 seed 划分)')
     parser.add_argument('--max_samples', type=int, default=None,
                         help='只用前 N 条样本 (调试用, 不限制则跑全量)')
     return parser.parse_args()
@@ -382,17 +389,19 @@ if __name__ == '__main__':
     except ValueError as e:
         raise SystemExit(f"[error] {e}") from e
 
-    # train/val 划分: 用固定 seed 对全量样本做 permutation 后按比例切分
-    # (固定 seed 保证重启/断点续训时划分完全一致, 验证集不会混入训练集)
+    # train/val 划分: 用固定 seed 划出配置指定数量的验证样本。
+    # 同一份数据、seed 和 valid_samples 会得到完全一致的验证集。
     n_total = len(full_dataset)
     if args.max_samples:
         n_total = min(n_total, int(args.max_samples))
-    valid_size = max(1, int(n_total * args.valid_ratio))
-    if valid_size >= n_total:
-        raise SystemExit(
-            f"[error] 验证集 {valid_size} 条 >= 可用样本 {n_total} 条, 请调小 --valid_ratio")
-    perm = np.random.default_rng(config.system.seed).permutation(n_total)
-    val_indices, train_indices = perm[:valid_size], perm[valid_size:]
+    try:
+        train_indices, val_indices = split_train_validation_indices(
+            n_total,
+            config.training.valid_samples,
+            config.system.seed,
+        )
+    except ValueError as e:
+        raise SystemExit(f"[error] {e}") from e
 
     train_dataset = Subset(full_dataset, train_indices.tolist())
     val_dataset = Subset(full_dataset, val_indices.tolist())
@@ -409,7 +418,7 @@ if __name__ == '__main__':
         dataset=val_dataset,
         batch_size=config.training.batch_size,
         shuffle=False,
-        drop_last=True,
+        drop_last=False,
     )
 
     # 尝试加载断点

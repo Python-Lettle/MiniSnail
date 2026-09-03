@@ -240,5 +240,8 @@ output/
 
 *eval_result.txt
 
+# 单元测试脚本暂时不上传
+tests/unit
+
 # Triton/torch.compile 缓存
 .triton_cache/

@@ -123,14 +123,13 @@ MiniSnail 不直接使用 tokenizer 自带的 Qwen/MiniMind `chat_template`，�
 python scripts/get_config.py
 ```
 
-2. 运行训练脚本。数据路径、模型保存目录与训练/验证划分比例通过命令行参数传入：
+2. 运行训练脚本。数据路径和模型保存目录通过命令行参数传入；固定验证集数量由 `config.json` 中的 `training.valid_samples` 指定：
 
 ```bash
 python trainer/train_pretrain.py \
     --config ./config.json \
     --data_path ./dataset/full/pretrain_t2t.jsonl \
-    --save_model_dir ./output/new_pretrain \
-    --train_ratio 0.95
+    --save_model_dir ./output/new_pretrain
 ```
 
 - 训练中断后，可通过 `config.json` 中的 `training.use_checkpoint` / `training.from_checkpoint` 断点续训（checkpoint 内含模型、优化器、GradScaler 及完整的 RNG 状态）；
@@ -172,8 +171,6 @@ python scripts/eval_perplexity.py \
     --data_path ./dataset/full/pretrain_t2t.jsonl \
     --models_dir ./model/new_pretrain \
     --pattern "pretrain_lm_*.pt" \
-    --train_ratio 0.95 \
-    --num_samples 5000 \
     --output_path ./eval/history/eval_ppl/eval_ppl_score.json
 ```
 
@@ -217,14 +214,14 @@ python scripts/eval_generation.py \
 ```bash
 python scripts/eval_preference.py \
     --config ./model/new_dpo/config.json \
-    --data_path ./dataset/dpo_valid.jsonl \
+    --data_path ./dataset/dpo_eval.jsonl \
     --model_path ./model/new_dpo/dpo_new.pt \
     --reference_model_path ./model/new_sft/sft_final.pt \
     --num_samples 2000 \
     --output_path ./eval/history/eval_preference/dpo.json
 ```
 
-`dpo_valid.jsonl` 必须是从未参与 DPO 训练的独立数据。重点观察 `dpo_accuracy`、`mean_implicit_reward_margin`，同时结合 `policy_chosen_win_rate` 与长度归一化 gap 排查回复长度偏置。不要在训练集上报告 DPO 指标。
+可用 `python scripts/create_dpo_eval.py` 从现有数据确定性抽取并校验 2000 条流程测试样本。注意：如果源文件已经参与训练，这份抽样只能验证评测流程，不能代表严格的泛化结果。正式报告时，`dpo_eval.jsonl` 必须在 DPO 训练前划出并从训练集排除。重点观察 `dpo_accuracy`、`mean_implicit_reward_margin`，同时结合 `policy_chosen_win_rate` 与长度归一化 gap 排查回复长度偏置。
 
 ### Step 5：SFT 与 DPO
 
@@ -245,9 +242,10 @@ python scripts/preprocess_sft_data.py \
 python trainer/train_sft.py \
     --config ./config.json \
     --data_dir ./dataset/full \
-    --save_model_dir ./output/new_sft \
-    --valid_ratio 0.005
+    --save_model_dir ./output/new_sft
 ```
+
+预训练与 SFT 都会按 `system.seed` 固定划出 `training.valid_samples` 条验证样本，并在每次验证时完整复用同一验证集。
 
 训练产物：`sft_best.pt`（验证集 loss 最低）与 `sft_final.pt`（训练结束权重）。
 

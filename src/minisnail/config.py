@@ -32,7 +32,7 @@ class TrainingConfig:
     weight_decay: float = 0.001
     dpo_beta: float = 0.1
     valid_interval: int = 400
-    valid_batches: int = 20
+    valid_samples: int = 1000
     gradient_clip: float = 1.0
     accumulation_steps: int = 1
     print_interval: int = 200
@@ -104,10 +104,16 @@ class SnailConfig:
     @classmethod
     def from_dict(cls, config_dict: dict) -> "SnailConfig":
         """Create configuration from dictionary"""
+        training_dict = dict(config_dict.get("training", {}))
+        # 旧配置中的 valid_batches 实际一直按“样本数”使用。读取时迁移到
+        # valid_samples，避免历史 config 直接失效；新配置只输出新字段。
+        if "valid_samples" not in training_dict and "valid_batches" in training_dict:
+            training_dict["valid_samples"] = training_dict["valid_batches"]
+        training_dict.pop("valid_batches", None)
         return cls(
             tokenizer=TokenizerConfig(**config_dict.get("tokenizer", {})),
             model=ModelConfig(**config_dict.get("model", {})),
-            training=TrainingConfig(**config_dict.get("training", {})),
+            training=TrainingConfig(**training_dict),
             scheduler=SchedulerConfig(**config_dict.get("scheduler", {})),
             system=SystemConfig(**config_dict.get("system", {})),
             generation=GenerationConfig(**config_dict.get("generation", {})),
