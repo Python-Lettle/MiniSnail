@@ -1,7 +1,35 @@
+[build-system]
+requires = ["setuptools==75.8.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "minisnail"
 version = "0.1.0"
 description = "MiniSnail"
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "einops==0.8.2",
+    "jaxtyping==0.3.9",
+    "numpy==2.1.2",
+    "rich==15.0.0",
+    "torch==2.6.0",
+    "tqdm==4.68.3",
+    "transformers==5.13.0",
+    "wandb==0.28.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest==9.0.3",
+]
+compile = [
+    "triton-windows==3.2.0.post21; platform_system == 'Windows'",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+addopts = "--strict-config --strict-markers -ra"

@@ -35,8 +35,32 @@ JSONL Data -> Pre-training         (已完成)
 ```bash
 git clone https://github.com/Python-Lettle/MiniSnail.git
 cd MiniSnail
-pip install -e .
+python -m venv .venv
 ```
+
+Windows PowerShell：
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[test]"
+```
+
+项目固定使用 Python 3.12 和已验证的直接依赖版本。`.[test]` 会额外安装自动化测试依赖。
+如需复现项目训练时的 CUDA 12.6 环境，请在安装项目前先安装对应的 PyTorch wheel：
+
+```powershell
+python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu126
+python -m pip install -e ".[compile,test]"
+```
+
+安装后先运行不需要 GPU、数据集或模型权重的快速回归测试：
+
+```powershell
+python -m pytest
+```
+
+`tests/unit` 是 pytest 自动化回归测试；`tests/test_pretrain_lm.py` 等原有文件是需要模型权重和人工输入的交互式评测脚本，不会被 pytest 收集。
 
 ### Step 2：数据集
 

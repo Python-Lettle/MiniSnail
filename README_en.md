@@ -35,8 +35,31 @@ JSONL Data -> Pre-training         (Completed)
 ```bash
 git clone https://github.com/Python-Lettle/MiniSnail.git
 cd MiniSnail
-pip install -e .
+python -m venv .venv
 ```
+
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[test]"
+```
+
+The project requires Python 3.12 and pins the direct dependency versions used by the verified training environment. The `test` extra installs the automated test dependency. To reproduce the CUDA 12.6 training environment, install the matching PyTorch wheel before installing the project:
+
+```powershell
+python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu126
+python -m pip install -e ".[compile,test]"
+```
+
+After installation, run the fast regression suite. It does not require a GPU, dataset, or model weights:
+
+```powershell
+python -m pytest
+```
+
+`tests/unit` contains the pytest regression suite. Existing files such as `tests/test_pretrain_lm.py` are interactive evaluation scripts that require model weights and user input, so pytest does not collect them.
 
 ### Step 2: Dataset
 

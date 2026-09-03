@@ -29,14 +29,25 @@ def load_checkpoint(
 
     return checkpoint
 
+
+def export_pretrain_model(checkpoint_path: str, output_dir: str) -> str:
+    """从训练 checkpoint 导出纯模型权重，并返回输出文件路径。"""
+    checkpoint = load_checkpoint(checkpoint_path)
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(
+        output_dir,
+        f"pretrain_lm_{checkpoint['global_step']}.pt",
+    )
+    torch.save(checkpoint['model_state_dict'], output_path)
+    return output_path
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Load pretrain model from checkpoint.')
     parser.add_argument('--checkpoint', type=str, default='./output/new_pretrain/checkpoint.pt', help='Path to the checkpoint file.')
-    parser.add_argument('--output', type=str, default='./model/new_pretrain', help='Path to the output file.')
+    parser.add_argument('--output', type=str, default='./model/new_pretrain', help='Directory for the exported model file.')
     args = parser.parse_args()
-    
+
     console.print(f"Loading checkpoint from {args.checkpoint}")
-    checkpoint = load_checkpoint(args.checkpoint)
-    args.output = os.path.join(args.output, 'pretrain_lm_' + str(checkpoint['global_step']) + '.pt')
-    torch.save(checkpoint['model_state_dict'], args.output)
-    console.print(f"Pretrain model saved to {args.output}")
+    output_path = export_pretrain_model(args.checkpoint, args.output)
+    console.print(f"Pretrain model saved to {output_path}")

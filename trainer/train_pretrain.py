@@ -306,6 +306,7 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
         console.print(f"[red]Error at global_step {global_step} / {total_steps}")
         console.print(traceback.format_exc())
         save_and_exit()
+        raise
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -435,4 +436,3 @@ if __name__ == '__main__':
 
     if run is not None:
         run.finish()
-    
