@@ -16,7 +16,7 @@ MiniSnail is a lightweight language model project. Its goal is to **simulate the
 Raw   Data -> MiniMind Tokenizer   (vocab_size = 6400)
 JSONL Data -> Pre-training         (Completed)
            -> SFT                  (Completed)
-           -> DPO                  (In progress)
+           -> DPO                  (Completed)
 ```
 
 ## Quick Start
@@ -97,6 +97,12 @@ DPO data contains one preference sample per line (`chosen` and `rejected` share 
 
 It is recommended to place the dataset in the `./dataset` directory.
 
+### Chat Protocol
+
+MiniSnail does not directly use the tokenizer's bundled Qwen/MiniMind chat template because it injects thinking/tool markers that the current model does not train. Training and inference share the `minisnail-chat-v1` implementation in `src/minisnail/chat_protocol.py`.
+
+SFT supervises only assistant content and `<|im_end|>`; message headers, separators, and non-assistant messages are context. DPO, `model.chat()`, interactive inference, and generation evaluation use the same prompt and completion encoders. The protocol version is stored in `sft_meta.json`; legacy shards are rejected and must be regenerated.
+
 ### Step 3: Pre-training
 
 1. Generate the configuration file (or edit `config.json` directly):
@@ -134,19 +140,45 @@ python scripts/get_pretrain_model_from_cpt.py \
     --output ./model/new_pretrain
 ```
 
-### Step 4: Model Evaluation
+### Step 4: Standard Evaluation Flow
 
-- Perplexity evaluation: iterate over all weights in the model directory, reporting average loss / perplexity together with a significance test:
-
-```bash
-python scripts/eval_perplexity.py
-```
-
-- Generative evaluation on a self-built prompt test set: generate and save the full outputs for each prompt, making them easy to review manually:
+Always evaluate with the config that belongs to the checkpoint. For comparisons, keep the split, seed, maximum generation length, and decoding settings fixed, and use greedy decoding.
 
 ```bash
-python scripts/eval_generation.py
+# 1. Fast CPU regression tests
+python -m pytest
+
+# 2. Pre-training perplexity on the exact held-out split
+python scripts/eval_perplexity.py \
+    --config ./model/new_pretrain/config.json \
+    --data_path ./dataset/full/pretrain_t2t.jsonl \
+    --models_dir ./model/new_pretrain \
+    --pattern "pretrain_lm_*.pt" \
+    --train_ratio 0.95 \
+    --num_samples 5000
+
+# 3. Pre-training continuation smoke test
+python scripts/eval_generation.py \
+    --config ./model/new_pretrain/config.json \
+    --model_path ./model/new_pretrain/model_final.pt \
+    --prompt_format pretrain --greedy
+
+# 4. SFT/DPO chat regression (run once for each checkpoint)
+python scripts/eval_generation.py \
+    --config ./model/new_sft/config.json \
+    --model_path ./model/new_sft/sft_final.pt \
+    --prompt_format chat --greedy
+
+# 5. DPO preference improvement on a never-trained-on holdout file
+python scripts/eval_preference.py \
+    --config ./model/new_dpo/config.json \
+    --data_path ./dataset/dpo_valid.jsonl \
+    --model_path ./model/new_dpo/dpo_new.pt \
+    --reference_model_path ./model/new_sft/sft_final.pt \
+    --num_samples 2000
 ```
+
+Perplexity is token-weighted and is comparable only with the same tokenizer and validation data. Generation output reports a reference-hit smoke metric and EOS stop rate; it is not a public benchmark score. The preference report includes DPO accuracy, implicit reward margin, raw chosen win rates, and a length-normalized diagnostic. Never report DPO metrics measured on its training file.
 
 ### Step 5: SFT and DPO
 
@@ -155,8 +187,11 @@ python scripts/eval_generation.py
 ```bash
 python scripts/preprocess_sft_data.py \
     --data_path ./dataset/full/sft_t2t.jsonl \
-    --output_dir ./dataset/full
+    --output_dir ./dataset/full \
+    --overwrite
 ```
+
+> `minisnail-chat-v1` changes the assistant label boundary. Regenerate every SFT shard after upgrading; do not mix legacy and new `.npy` files.
 
 For training, pass the shard directory via `--data_dir`; `training.from_weight` should point to the exported pre-training weights:
 

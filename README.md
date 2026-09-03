@@ -16,7 +16,7 @@ MiniSnail 是一个轻量级语言模型项目，目标是**用远少于大型�
 Raw   Data -> MiniMind Tokenizer   (vocab_size = 6400)
 JSONL Data -> Pre-training         (已完成)
            -> SFT                  (已完成)
-           -> DPO                  (进行中)
+           -> DPO                  (已完成)
 ```
 
 ## 快速开始
@@ -98,6 +98,23 @@ DPO 数据每行一条偏好样本（`chosen` 与 `rejected` 共享相同的提�
 
 建议将数据集放在 `./dataset` 目录下。
 
+### 对话协议
+
+MiniSnail 不直接使用 tokenizer 自带的 Qwen/MiniMind `chat_template`，因为该模板会注入当前模型未训练的 thinking/tool 标记。训练与推理统一使用 `src/minisnail/chat_protocol.py` 中的 `minisnail-chat-v1`：
+
+```text
+<|im_start|>user
+问题<|im_end|>
+<|im_start|>assistant
+回答<|im_end|>
+```
+
+- SFT 只监督 assistant 正文和 `<|im_end|>`；角色头、system/user/tool 消息及消息分隔符均为上下文；
+- DPO 的 prompt 与推理 prompt 使用同一个编码函数，completion 同样只包含 assistant 正文和 `<|im_end|>`；
+- `model.chat()`、自动生成评测和交互式测试使用完全相同的 assistant 生成起点。
+
+`sft_meta.json` 会记录协议版本。旧版 SFT 分片缺少该字段，训练脚本会拒绝加载，必须重新预处理，避免新旧标签语义静默混用。
+
 ### Step 3：预训练
 
 1. 生成配置文件（或直接编辑 `config.json`）：
@@ -135,19 +152,79 @@ python scripts/get_pretrain_model_from_cpt.py \
     --output ./model/new_pretrain
 ```
 
-### Step 4：模型评测
+### Step 4：标准评测流程
 
-- 困惑度（perplexity）评测：遍历模型目录下所有权重，给出平均 loss / perplexity 及显著性检验：
+评测时必须使用与权重对应的 `config.json`。不同模型横向比较时，应固定数据划分、seed、生成长度和解码方式，并使用 `--greedy`；采样结果只适合人工观察，不适合作为模型排名依据。
 
-```bash
-python scripts/eval_perplexity.py
-```
-
-- 自建提示词测试集上的生成式评测：逐题生成并保存完整输出，便于人工判读：
+#### 4.1 快速回归测试
 
 ```bash
-python scripts/eval_generation.py
+python -m pytest
 ```
+
+该步骤验证模型前向、KV Cache、断点状态、数据集、训练—推理协议以及评测指标实现，不需要 GPU 或模型权重。
+
+#### 4.2 预训练 PPL
+
+```bash
+python scripts/eval_perplexity.py \
+    --config ./model/new_pretrain/config.json \
+    --data_path ./dataset/full/pretrain_t2t.jsonl \
+    --models_dir ./model/new_pretrain \
+    --pattern "pretrain_lm_*.pt" \
+    --train_ratio 0.95 \
+    --num_samples 5000 \
+    --output_path ./eval/history/eval_ppl/eval_ppl_score.json
+```
+
+验证集划分与预训练脚本一致。主指标是按 token 加权的语料级 `avg_loss` / `perplexity`；文档均值、95% CI 和配对差异用于判断 checkpoint 间的变化是否稳定。只能直接比较使用同一 tokenizer 和同一验证集的模型。
+
+#### 4.3 预训练生成冒烟测试
+
+```bash
+python scripts/eval_generation.py \
+    --config ./model/new_pretrain/config.json \
+    --model_path ./model/new_pretrain/model_final.pt \
+    --prompt_format pretrain \
+    --greedy \
+    --output_path ./eval/history/eval_generation/pretrain.json
+```
+
+`pretrain` 格式使用“BOS + 原始文本”，用于观察基础续写能力，不应拿它评测 SFT/DPO 对话权重。
+
+#### 4.4 SFT / DPO 对话生成评测
+
+```bash
+python scripts/eval_generation.py \
+    --config ./model/new_sft/config.json \
+    --model_path ./model/new_sft/sft_final.pt \
+    --prompt_format chat \
+    --greedy \
+    --output_path ./eval/history/eval_generation/sft.json
+
+python scripts/eval_generation.py \
+    --config ./model/new_dpo/config.json \
+    --model_path ./model/new_dpo/dpo_new.pt \
+    --prompt_format chat \
+    --greedy \
+    --output_path ./eval/history/eval_generation/dpo.json
+```
+
+输出包含完整回答、`reference_hit_rate` 和 `eos_stop_rate`。`reference_hit_rate` 只是固定题集的回归/冒烟指标，不等价于公开 benchmark 的准确率；开放题仍需人工检查。
+
+#### 4.5 DPO 偏好评测
+
+```bash
+python scripts/eval_preference.py \
+    --config ./model/new_dpo/config.json \
+    --data_path ./dataset/dpo_valid.jsonl \
+    --model_path ./model/new_dpo/dpo_new.pt \
+    --reference_model_path ./model/new_sft/sft_final.pt \
+    --num_samples 2000 \
+    --output_path ./eval/history/eval_preference/dpo.json
+```
+
+`dpo_valid.jsonl` 必须是从未参与 DPO 训练的独立数据。重点观察 `dpo_accuracy`、`mean_implicit_reward_margin`，同时结合 `policy_chosen_win_rate` 与长度归一化 gap 排查回复长度偏置。不要在训练集上报告 DPO 指标。
 
 ### Step 5：SFT 与 DPO
 
@@ -156,8 +233,11 @@ python scripts/eval_generation.py
 ```bash
 python scripts/preprocess_sft_data.py \
     --data_path ./dataset/full/sft_t2t.jsonl \
-    --output_dir ./dataset/full
+    --output_dir ./dataset/full \
+    --overwrite
 ```
+
+> `minisnail-chat-v1` 修改了 assistant 标签边界。升级后必须重新生成全部 SFT 分片；不要把旧 `.npy` 与新分片混用。
 
 训练时通过 `--data_dir` 指定分片目录，`training.from_weight` 应指向预训练导出的权重：
 
