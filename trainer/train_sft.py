@@ -19,10 +19,10 @@ from torch.optim import Optimizer
 import torch.nn.functional as F
 
 from minisnail.dataset import SFTDataset, get_dataloader, get_epoch_dataloader
-from minisnail.functions import cosine_schedule, gradient_clipping
+from minisnail.functions import apply_optimizer_step
 from minisnail.tokenizer import get_tokenizer
 from minisnail.config import SnailConfig
-from minisnail.util import setup_seed, load_config, print_train_config
+from minisnail.util import setup_seed, restore_rng_state, load_config, print_train_config
 from minisnail.debug import console
 from minisnail.model import init_model
 
@@ -34,6 +34,7 @@ def save_checkpoint(
     epoch: int,
     step: int,
     optimizer_step: int,
+    val_min_loss: float,
     run: wandb.Run,
     out: str | os.PathLike | BinaryIO | IO[bytes],
 ):
@@ -64,6 +65,7 @@ def save_checkpoint(
             'epoch': epoch,
             'last_step': step,
             'optimizer_step': optimizer_step,
+            'val_min_loss': val_min_loss,
             'wandb_id': run.id if run is not None else None,
             "rng_state":{
                 "torch":
@@ -108,7 +110,9 @@ def load_checkpoint(
 def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader: DataLoader, model: nn.Module, optimizer: Optimizer, save_model_dir: str = "./output", checkpoint: dict[str, Any] | None = None, run: wandb.Run | None = None):
     # 计算 epoch 和 step 的数量
     total_steps = len(train_dataloader) * config.training.epochs
-    total_optimizer_steps = total_steps // config.training.accumulation_steps
+    total_optimizer_steps = (
+        total_steps + config.training.accumulation_steps - 1
+    ) // config.training.accumulation_steps
     console.print(f"Train dataset samples: {len(train_dataloader.dataset)} \n"
                f"Val dataset samples: {len(val_dataloader.dataset)} \n"
                f"Total epochs: {config.training.epochs} \n"
@@ -146,27 +150,42 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
     has_pending_grads = False
     accumulated_steps = 0
 
-    val_min_loss = np.inf
+    val_min_loss = checkpoint.get('val_min_loss', np.inf) if checkpoint else np.inf
+
+    def apply_pending_gradients():
+        """提交当前累积窗口；残余窗口会按实际 micro-batch 数重新归一化。"""
+        nonlocal has_pending_grads, accumulated_steps, optimizer_step, current_lr
+        if not has_pending_grads:
+            return
+        optimizer_step, current_lr = apply_optimizer_step(
+            model.parameters(),
+            optimizer,
+            scaler,
+            accumulated_steps=accumulated_steps,
+            accumulation_steps=config.training.accumulation_steps,
+            optimizer_step=optimizer_step,
+            max_l2_norm=config.training.gradient_clip,
+            max_learning_rate=config.scheduler.max_learning_rate,
+            min_learning_rate=config.scheduler.min_learning_rate,
+            warmup_iters=config.scheduler.warmup_iters,
+            cosine_cycle_iters=config.scheduler.cosine_cycle_iters,
+        )
+        accumulated_steps = 0
+        has_pending_grads = False
 
     def save_and_exit():
-        """训练退出前: flush 残余梯度并保存 checkpoint"""
-        nonlocal has_pending_grads
-        # 若有累积的梯度, 则完成最后一次参数更新
+        """训练退出前正确提交残余梯度并保存一致的 checkpoint。"""
         if has_pending_grads:
-            # 异常可能发生在 unscale 之后, 此时不能重复 unscale
-            try:
-                scaler.unscale_(optimizer)
-            except RuntimeError:
-                pass
-            gradient_clipping(model.parameters(), config.training.gradient_clip)
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
-            has_pending_grads = False
-            console.print("[yellow]Pending gradients updated")
+            pending_count = accumulated_steps
+            apply_pending_gradients()
+            console.print(
+                f"[yellow]Committed {pending_count} pending micro-batch(es) "
+                f"as optimizer step {optimizer_step}"
+            )
         # 保存 checkpoint
         save_checkpoint(
-            base_model, optimizer, scaler, global_step, epoch, epoch_step, optimizer_step, run,
+            base_model, optimizer, scaler, global_step, epoch, epoch_step,
+            optimizer_step, val_min_loss, run,
             os.path.join(save_model_dir, "checkpoint.pt"),
         )
         console.print(f"[green]Checkpoint saved to {save_model_dir} at global_step {global_step} / {total_steps}")
@@ -190,9 +209,6 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
             )
             for step, (input_ids, labels) in enumerate(epoch_loader):
                 input_ids, labels = input_ids.to(model.device), labels.to(model.device)
-                global_step += 1
-                epoch_step += 1
-
                 with torch.autocast(device_type=model.device.type, dtype=amp_dtype, enabled=autocast_enabled):
                     logits = model(input_ids)
                     loss = F.cross_entropy(
@@ -206,31 +222,13 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
                 scaler.scale(scaled_loss).backward()
                 accumulated_steps += 1
                 has_pending_grads = True
+                # 只有 forward/backward 均成功后，这个 batch 才能记作已完成。
+                global_step += 1
+                epoch_step += 1
 
                 # 如果到了梯度累积的步数，更新梯度
-                if accumulated_steps % config.training.accumulation_steps == 0:
-                    accumulated_steps = 0
-                    optimizer_step += 1
-                    # 梯度先反缩放再裁剪, 保证裁剪阈值作用于真实梯度值
-                    scaler.unscale_(optimizer)
-                    gradient_clipping(model.parameters(), config.training.gradient_clip)
-
-                    # 学习率调度：每个迭代计算一次学习率
-                    current_lr = cosine_schedule(
-                        optimizer_step,
-                        max_learning_rate=config.scheduler.max_learning_rate,
-                        min_learning_rate=config.scheduler.min_learning_rate,
-                        warmup_iters=config.scheduler.warmup_iters,
-                        cosine_cycle_iters=config.scheduler.cosine_cycle_iters,
-                    )
-                    # 更新学习率
-                    for param_group in optimizer.param_groups:
-                        param_group["lr"] = current_lr
-
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer.zero_grad()
-                    has_pending_grads = False
+                if accumulated_steps == config.training.accumulation_steps:
+                    apply_pending_gradients()
 
                 # Wandb 日志
                 if run is not None:
@@ -316,6 +314,16 @@ def load_sft_meta(data_dir: str) -> dict | None:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
+
+def validate_sft_context_length(dataset_length: int, model_length: int) -> None:
+    """拒绝使用与模型上下文长度不一致的预处理数据。"""
+    if dataset_length != model_length:
+        raise ValueError(
+            f"npy 序列长度 {dataset_length} 与 "
+            f"config.model.context_length={model_length} 不一致；"
+            f"请用相同的 --max_length 重新预处理，拒绝以错误配置继续训练"
+        )
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='./config.json')
@@ -351,10 +359,13 @@ if __name__ == '__main__':
                       f"{meta.get('num_samples')} 条 | 分片 {meta.get('num_shards')} 个 | "
                       f"dtype={meta.get('dtype')}")
         console.print(f"[Data] 丢弃统计: {meta.get('stats')}")
-    if full_dataset.max_length != config.model.context_length:
-        console.print(f"[red]npy 序列长度 {full_dataset.max_length} 与 "
-                      f"config.model.context_length={config.model.context_length} 不一致, "
-                      f"请确认预处理用的 --max_length 与 config.json 是同一套")
+    try:
+        validate_sft_context_length(
+            full_dataset.max_length,
+            config.model.context_length,
+        )
+    except ValueError as e:
+        raise SystemExit(f"[error] {e}") from e
 
     # train/val 划分: 用固定 seed 对全量样本做 permutation 后按比例切分
     # (固定 seed 保证重启/断点续训时划分完全一致, 验证集不会混入训练集)
@@ -389,16 +400,12 @@ if __name__ == '__main__':
     # 尝试加载断点
     checkpoint = None
     if config.training.use_checkpoint:
+        if not config.training.from_checkpoint:
+            raise SystemExit(
+                "[error] use_checkpoint=True 但 training.from_checkpoint 未设置"
+            )
         checkpoint = load_checkpoint(config.training.from_checkpoint)
         console.print(f"Loaded checkpoint from {config.training.from_checkpoint}, global_step: {checkpoint['global_step']}, wandb_id: {checkpoint['wandb_id']}")
-
-    # 恢复随机状态 (仅断点续训时; key 与 save_checkpoint 中的 rng_state 对应)
-    if checkpoint is not None and 'rng_state' in checkpoint:
-        rng_state = checkpoint['rng_state']
-        torch.set_rng_state(rng_state['torch'])
-        torch.cuda.set_rng_state_all(rng_state['cuda'])
-        np.random.set_state(rng_state['numpy'])
-        random.setstate(rng_state['python'])
 
     # 使用 wandb
     run = None
@@ -449,6 +456,11 @@ if __name__ == '__main__':
     if checkpoint is not None:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         console.print(f"[green]Loaded optimizer state from checkpoint")
+
+    # 放到所有初始化之后，避免模型初始化、compile warmup 或 W&B 再次推进 RNG。
+    if checkpoint is not None and 'rng_state' in checkpoint:
+        restore_rng_state(checkpoint['rng_state'])
+        console.print("[green]Restored RNG state from checkpoint")
 
     # 开始训练
     os.makedirs(args.save_model_dir, exist_ok=True)

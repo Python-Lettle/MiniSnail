@@ -124,3 +124,59 @@ def gradient_clipping(
     '''
     # foreach=False：规避 Windows + CUDA 上 _foreach_norm 系列算子的 access violation
     torch.nn.utils.clip_grad_norm_(parameters, max_norm=max_l2_norm, foreach=False)
+
+
+def apply_optimizer_step(
+    parameters: Iterable[torch.nn.Parameter],
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler,
+    accumulated_steps: int,
+    accumulation_steps: int,
+    optimizer_step: int,
+    max_l2_norm: float,
+    max_learning_rate: float,
+    min_learning_rate: float,
+    warmup_iters: int,
+    cosine_cycle_iters: int,
+) -> tuple[int, float]:
+    """提交一次完整或残余的梯度累积，并返回新的 step 与学习率。
+
+    每个 micro-batch 的 loss 都预先除以 ``accumulation_steps``。当训练结束或
+    被中断时，残余窗口只有 ``accumulated_steps`` 个 micro-batch，因此需要把
+    梯度乘回 ``accumulation_steps / accumulated_steps``，才能仍表示这些样本的
+    平均梯度。学习率和 optimizer step 也在这里统一推进，避免 checkpoint 的
+    调度状态落后于实际参数。
+    """
+    if accumulation_steps <= 0:
+        raise ValueError("accumulation_steps 必须大于 0")
+    if not 1 <= accumulated_steps <= accumulation_steps:
+        raise ValueError(
+            "accumulated_steps 必须在 [1, accumulation_steps] 范围内"
+        )
+
+    params = list(parameters)
+    scaler.unscale_(optimizer)
+
+    if accumulated_steps != accumulation_steps:
+        correction = accumulation_steps / accumulated_steps
+        for parameter in params:
+            if parameter.grad is not None:
+                parameter.grad.mul_(correction)
+
+    gradient_clipping(params, max_l2_norm)
+
+    next_optimizer_step = optimizer_step + 1
+    current_lr = cosine_schedule(
+        next_optimizer_step,
+        max_learning_rate=max_learning_rate,
+        min_learning_rate=min_learning_rate,
+        warmup_iters=warmup_iters,
+        cosine_cycle_iters=cosine_cycle_iters,
+    )
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = current_lr
+
+    scaler.step(optimizer)
+    scaler.update()
+    optimizer.zero_grad()
+    return next_optimizer_step, current_lr

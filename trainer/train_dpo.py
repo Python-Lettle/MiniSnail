@@ -15,10 +15,10 @@ from typing import IO, Any, BinaryIO
 from minisnail.model import SnailModel, init_model
 from minisnail.config import SnailConfig
 from minisnail.debug import console
-from minisnail.util import load_config, setup_seed
+from minisnail.util import load_config, setup_seed, restore_rng_state
 from minisnail.dataset import DPODataset, get_epoch_dataloader
 from minisnail.tokenizer import get_tokenizer
-from minisnail.functions import cosine_schedule, gradient_clipping
+from minisnail.functions import apply_optimizer_step
 
 def save_checkpoint(
     policy_model: torch.nn.Module,
@@ -211,22 +211,36 @@ def train_dpo(config: SnailConfig, save_model_dir: str, run: wandb.Run, checkpoi
     has_pending_grads = False
     last_save_step = global_step
 
+    def apply_pending_gradients():
+        """提交当前累积窗口；残余窗口会按实际 micro-batch 数重新归一化。"""
+        nonlocal has_pending_grads, accumulated_steps, optimizer_step, current_lr
+        if not has_pending_grads:
+            return
+        optimizer_step, current_lr = apply_optimizer_step(
+            policy_model.parameters(),
+            optimizer,
+            scaler,
+            accumulated_steps=accumulated_steps,
+            accumulation_steps=accumulation_steps,
+            optimizer_step=optimizer_step,
+            max_l2_norm=config.training.gradient_clip,
+            max_learning_rate=config.scheduler.max_learning_rate,
+            min_learning_rate=config.scheduler.min_learning_rate,
+            warmup_iters=config.scheduler.warmup_iters,
+            cosine_cycle_iters=config.scheduler.cosine_cycle_iters,
+        )
+        accumulated_steps = 0
+        has_pending_grads = False
+
     def save_and_exit():
-        """训练退出前: flush 残余梯度并保存 checkpoint (梯度无法随 checkpoint 跨进程恢复)"""
-        nonlocal has_pending_grads, accumulated_steps
+        """训练退出前正确提交残余梯度并保存一致的 checkpoint。"""
         if has_pending_grads:
-            # 异常可能发生在 unscale 之后, 此时不能重复 unscale
-            try:
-                scaler.unscale_(optimizer)
-            except RuntimeError:
-                pass
-            gradient_clipping(policy_model.parameters(), config.training.gradient_clip)
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
-            has_pending_grads = False
-            accumulated_steps = 0
-            console.print("[yellow]Pending gradients updated")
+            pending_count = accumulated_steps
+            apply_pending_gradients()
+            console.print(
+                f"[yellow]Committed {pending_count} pending micro-batch(es) "
+                f"as optimizer step {optimizer_step}"
+            )
         save_checkpoint(
             policy_model, reference_model, optimizer, scaler,
             global_step, epoch, epoch_step, optimizer_step, run,
@@ -253,9 +267,6 @@ def train_dpo(config: SnailConfig, save_model_dir: str, run: wandb.Run, checkpoi
                 collate_fn=collate_fn,
             )
             for batch in loader:
-                global_step += 1
-                epoch_step += 1
-
                 chosen_ids = batch["chosen_ids"].to(device)
                 chosen_mask = batch["chosen_mask"].to(device)
                 rejected_ids = batch["rejected_ids"].to(device)
@@ -288,28 +299,12 @@ def train_dpo(config: SnailConfig, save_model_dir: str, run: wandb.Run, checkpoi
                 scaler.scale(scaled_loss).backward()
                 accumulated_steps += 1
                 has_pending_grads = True
+                # 只有 forward/backward 均成功后，这个 batch 才能记作已完成。
+                global_step += 1
+                epoch_step += 1
 
                 if accumulated_steps == accumulation_steps:
-                    accumulated_steps = 0
-                    optimizer_step += 1
-                    # 学习率调度：每个迭代计算一次学习率
-                    current_lr = cosine_schedule(
-                        optimizer_step,
-                        max_learning_rate=config.scheduler.max_learning_rate,
-                        min_learning_rate=config.scheduler.min_learning_rate,
-                        warmup_iters=config.scheduler.warmup_iters,
-                        cosine_cycle_iters=total_optimizer_steps,
-                    )
-                    # 梯度先反缩放再裁剪, 保证裁剪阈值作用于真实梯度值
-                    scaler.unscale_(optimizer)
-                    gradient_clipping(policy_model.parameters(), config.training.gradient_clip)
-                    for param_group in optimizer.param_groups:
-                        param_group["lr"] = current_lr
-
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer.zero_grad()
-                    has_pending_grads = False
+                    apply_pending_gradients()
 
                 chosen_reward = config.training.dpo_beta * (policy_chosen - ref_chosen)
                 rejected_reward = config.training.dpo_beta * (policy_rejected - ref_rejected)
@@ -393,14 +388,6 @@ if __name__ == "__main__":
         console.print(f"Loaded checkpoint from {config.training.from_checkpoint}, "
                       f"global_step: {checkpoint['global_step']}, wandb_id: {checkpoint['wandb_id']}")
 
-    # 恢复随机状态 (仅断点续训时; key 与 save_checkpoint 中的 rng_state 对应)
-    if checkpoint is not None and 'rng_state' in checkpoint:
-        rng_state = checkpoint['rng_state']
-        torch.set_rng_state(rng_state['torch'])
-        torch.cuda.set_rng_state_all(rng_state['cuda'])
-        np.random.set_state(rng_state['numpy'])
-        random.setstate(rng_state['python'])
-
     # 3. Load model
     # 参数保持 fp32（AdamW 小 lr 更新需要精度），仅 forward 用 autocast(bf16) 降低激活显存
     # 注意：纯 bf16 权重 + lr=1e-6 时更新会被 bf16 舍入吞掉，loss 将恒为 ln(2)
@@ -413,8 +400,13 @@ if __name__ == "__main__":
         policy_model.load_state_dict(checkpoint['policy_model_state_dict'])
         reference_model.load_state_dict(checkpoint['reference_model_state_dict'])
     elif config.training.from_weight is not None:
-        policy_model.load_state_dict(torch.load(config.training.from_weight))
-        reference_model.load_state_dict(torch.load(config.training.from_weight))
+        initial_state = torch.load(
+            config.training.from_weight,
+            map_location=device,
+            weights_only=True,
+        )
+        policy_model.load_state_dict(initial_state)
+        reference_model.load_state_dict(initial_state)
 
     reference_model.eval()
     for p in reference_model.parameters():
@@ -466,6 +458,11 @@ if __name__ == "__main__":
                 config=config,
             )
             console.print(f"Started new training, id: {run.id}")
+
+    # 模型、数据、优化器和 W&B 初始化都可能消耗随机数，必须最后恢复。
+    if checkpoint is not None and 'rng_state' in checkpoint:
+        restore_rng_state(checkpoint['rng_state'])
+        console.print("[green]Restored RNG state from checkpoint")
 
     start_time = time.time()
     train_dpo(config, args.save_model_dir, run, checkpoint, policy_model, reference_model,

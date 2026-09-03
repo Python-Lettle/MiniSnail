@@ -17,6 +17,15 @@ def setup_seed(seed: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+
+def restore_rng_state(rng_state: dict) -> None:
+    """在所有会消耗随机数的初始化完成后恢复 checkpoint 的 RNG 状态。"""
+    torch.set_rng_state(rng_state["torch"])
+    if torch.cuda.is_available() and rng_state.get("cuda") is not None:
+        torch.cuda.set_rng_state_all(rng_state["cuda"])
+    np.random.set_state(rng_state["numpy"])
+    random.setstate(rng_state["python"])
+
 def print_train_config(config: SnailConfig):
     console.print(f"---------- Training Config ----------")
     console.print("Device:", config.system.device)

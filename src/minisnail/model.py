@@ -12,7 +12,9 @@ def init_model(config: SnailConfig, model_path: str = None, device=None, dtype=N
     '''使用 config 初始化模型, 可以从 model_path 加载模型参数'''
     model = SnailModel(config, device=device, dtype=dtype)
     if model_path is not None:
-        model.load_state_dict(torch.load(model_path))
+        model.load_state_dict(
+            torch.load(model_path, map_location=model.device, weights_only=True)
+        )
     return model
 
 def top_p_filtering(logits, top_p):
@@ -613,7 +615,10 @@ class SnailModel(nn.Module):
         # 只加 assistant 标记，不加 <think> 标签
         prompt += "<|im_start|>assistant\n"
 
-        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(self.config.system.device)
+        # 以模型参数的实际设备为准；调用方可能已通过 model.to(...) 将模型移到
+        # generation.device，不能继续使用训练阶段的 system.device。
+        model_device = self.embedding.weight.device
+        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(model_device)
 
         # generate() 内部现在自动使用 KV Cache
         output_ids = self.generate(input_ids,eos_token_id=tokenizer.eos_token_id,**kwargs)
