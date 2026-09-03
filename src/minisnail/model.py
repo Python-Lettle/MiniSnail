@@ -294,6 +294,25 @@ def _no_repeat_ngram_mask(next_token_logits, seq, no_repeat_ngram_size):
     return next_token_logits
 
 
+def _apply_repetition_penalty(next_token_logits, seen_token_ids, repetition_penalty):
+    """对已出现过的 token 各应用一次 repetition penalty。
+
+    正 logit 除以 penalty，负 logit 乘以 penalty，保证两种情况都会降低
+    token 的选中概率。seen_token_ids 使用集合去重，避免按出现次数重复惩罚。
+    """
+    if repetition_penalty <= 1.0 or not seen_token_ids:
+        return next_token_logits
+
+    token_ids = list(seen_token_ids)
+    token_logits = next_token_logits[:, token_ids]
+    next_token_logits[:, token_ids] = torch.where(
+        token_logits < 0,
+        token_logits * repetition_penalty,
+        token_logits / repetition_penalty,
+    )
+    return next_token_logits
+
+
 class SnailModel(nn.Module):
     def __init__(
         self,
@@ -408,6 +427,7 @@ class SnailModel(nn.Module):
         logits, past_kv = self.forward(X, use_cache=True, start_pos=0)
         
         generated_ids = []
+        seen_token_ids = set(X[0].tolist())
 
         # 当前 cache 中有多少 token
         cache_len = X.size(-1)
@@ -418,14 +438,9 @@ class SnailModel(nn.Module):
             if do_sample:
                 next_token_logits = logits[:, -1] / temperature
                 # Repetition Penalty
-                if repetition_penalty > 1.0:
-                    # Prompt 中出现过的 token
-                    for token_id in X[0].tolist():
-                        next_token_logits[:,token_id] /= repetition_penalty
-
-                    # 已生成 token
-                    for token_id in generated_ids:
-                        next_token_logits[:,token_id] /= repetition_penalty
+                next_token_logits = _apply_repetition_penalty(
+                    next_token_logits, seen_token_ids, repetition_penalty
+                )
                 # n-gram 抑制放在 top_k/top_p 之前, 保证 top_k 始终保留候选, 避免 logits 全 -inf
                 next_token_logits = _no_repeat_ngram_mask(next_token_logits, X[0].tolist(), no_repeat_ngram_size)
                 # Top-K
@@ -444,9 +459,9 @@ class SnailModel(nn.Module):
             else:
                 # Greedy Decoding
                 next_token_logits = logits[:, -1]
-                if repetition_penalty > 1.0:
-                    for token_id in X[0].tolist():
-                        next_token_logits[:, token_id] /= repetition_penalty
+                next_token_logits = _apply_repetition_penalty(
+                    next_token_logits, seen_token_ids, repetition_penalty
+                )
                 next_token_logits = _no_repeat_ngram_mask(next_token_logits, X[0].tolist(), no_repeat_ngram_size)
                 next_token_id = next_token_logits.argmax(dim=-1, keepdim=True)
 
@@ -455,6 +470,7 @@ class SnailModel(nn.Module):
                 break
 
             generated_ids.append(next_token_id.item())
+            seen_token_ids.add(next_token_id.item())
 
             # 4. 将新 token 添加到序列
             X = torch.cat((X, next_token_id), dim=-1)
@@ -512,7 +528,7 @@ class SnailModel(nn.Module):
         # 得到：logits + 每一层的 KV Cache
         logits, past_kv = self.forward(X, use_cache=True, start_pos=0)
         
-        generated_ids = []
+        seen_token_ids = set(X[0].tolist())
 
         # 当前 cache 中有多少 token
         cache_len = X.size(-1)
@@ -523,14 +539,9 @@ class SnailModel(nn.Module):
             if do_sample:
                 next_token_logits = logits[:, -1] / temperature
                 # Repetition Penalty
-                if repetition_penalty > 1.0:
-                    # Prompt 中出现过的 token
-                    for token_id in X[0].tolist():
-                        next_token_logits[:,token_id] /= repetition_penalty
-
-                    # 已生成 token
-                    for token_id in generated_ids:
-                        next_token_logits[:,token_id] /= repetition_penalty
+                next_token_logits = _apply_repetition_penalty(
+                    next_token_logits, seen_token_ids, repetition_penalty
+                )
                 # n-gram 抑制放在 top_k/top_p 之前, 保证 top_k 始终保留候选, 避免 logits 全 -inf
                 next_token_logits = _no_repeat_ngram_mask(next_token_logits, X[0].tolist(), no_repeat_ngram_size)
                 # Top-K
@@ -549,20 +560,24 @@ class SnailModel(nn.Module):
             else:
                 # Greedy Decoding
                 next_token_logits = logits[:, -1]
-                if repetition_penalty > 1.0:
-                    for token_id in X[0].tolist():
-                        next_token_logits[:, token_id] /= repetition_penalty
+                next_token_logits = _apply_repetition_penalty(
+                    next_token_logits, seen_token_ids, repetition_penalty
+                )
                 next_token_logits = _no_repeat_ngram_mask(next_token_logits, X[0].tolist(), no_repeat_ngram_size)
                 next_token_id = next_token_logits.argmax(dim=-1, keepdim=True)
 
             # 遇到 EOS 停止
             if eos_token_id is not None and next_token_id.item() == eos_token_id:
                 break
-            
-            generated_ids.append(next_token_id.item())
+
+            seen_token_ids.add(next_token_id.item())
 
             # 4. 将新 token 添加到序列
             X = torch.cat((X, next_token_id), dim=-1)
+
+            # 生成后立即输出 token。缓存重建属于下一轮生成的准备工作，
+            # 不应该跳过当前 token 的 yield。
+            yield next_token_id.item()
 
             # 5. Context Window 已经满了
             # KV Cache 无法无限增长
@@ -584,8 +599,6 @@ class SnailModel(nn.Module):
                 )
             )
             cache_len += 1
-
-            yield next_token_id.item()
 
     def chat(self, message, tokenizer, history=None, **kwargs):
         messages = history or []
