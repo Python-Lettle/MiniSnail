@@ -272,6 +272,9 @@ class SFTDataset(Dataset):
 class DPODataset(Dataset):
 
     def __init__(self, path, tokenizer, max_length):
+        if max_length < 2:
+            raise ValueError("DPO max_length 必须至少为 2")
+
         self.items = []
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
@@ -283,7 +286,7 @@ class DPODataset(Dataset):
     def __len__(self):
         return len(self.items)
 
-    def encode_chat(self, messages):
+    def _encode_chat_parts(self, messages):
         """
         手动渲染模板 (与 model.chat / SFT 预处理一致, 不带 think 块):
             <|im_start|>role\n{content}<|im_end|>\n
@@ -291,12 +294,15 @@ class DPODataset(Dataset):
         prompt     = 除最后一条 assistant 外的全部消息 + <|im_start|>assistant\n
         completion = 最后一条 assistant 的正文 + <|im_end|> (生成到此停止, 不含尾随换行)
 
-        prompt / completion 分别编码后再拼接:
+        prompt / completion 分别编码:
         1. tokenizer 自带的 chat_template 是 Qwen3 风格, 会插入 <|im_start|>assistant\n<|think|>...
            与 SFT 训练/推理格式不一致, 偏好无法迁移到 model.chat 推理端;
-        2. 分别编码保证 full_ids 恰为 prompt_ids + completion_ids, mask 边界与 token 严格对齐
-           (两段拼接文本分别整体 tokenize, 不存在句中/句尾 BPE 切分差异导致的边界漂移)。
+        2. 分别编码保证 mask 边界与 token 严格对齐 (两段拼接文本
+           分别整体 tokenize, 不存在句中/句尾 BPE 切分差异导致的边界漂移)。
         """
+        if not messages or messages[-1].get("role") != "assistant":
+            raise ValueError("DPO 对话必须以 assistant 消息结尾")
+
         prompt_text = ""
         for message in messages[:-1]:
             prompt_text += f"<|im_start|>{message['role']}\n{message['content']}<|im_end|>\n"
@@ -306,31 +312,62 @@ class DPODataset(Dataset):
         prompt_ids = self.tokenizer(prompt_text, add_special_tokens=False)['input_ids']
         completion_ids = self.tokenizer(completion_text, add_special_tokens=False)['input_ids']
 
-        full_ids = prompt_ids + completion_ids
-        mask = [0] * len(prompt_ids) + [1] * len(completion_ids)
+        return prompt_ids, completion_ids
 
-        # 超长保留末尾 (与 SFT 预处理约定一致): 保住 assistant 回复与 <|im_end|>,
-        # 从左侧截掉 prompt 头部; completion 在序列末尾因此总是完整保留
-        if len(full_ids) > self.max_length:
-            full_ids = full_ids[-self.max_length:]
-            mask = mask[-self.max_length:]
+    @staticmethod
+    def _truncate_completion(completion_ids, budget):
+        """从右侧截断过长回复，同时保留末尾的 <|im_end|> token。"""
+        if len(completion_ids) <= budget:
+            return completion_ids
+        if budget == 1:
+            return completion_ids[-1:]
+        return completion_ids[:budget - 1] + completion_ids[-1:]
 
-        return (
-            torch.tensor(full_ids, dtype=torch.long),
-            torch.tensor(mask, dtype=torch.long),
-        )
+    def _truncate_pair(self, prompt_ids, chosen_completion, rejected_completion):
+        """
+        为一对偏好样本分配共享的截断预算。
+
+        两边都能放下时不截断。超长时，prompt 最多使用半个上下文窗口并
+        从左侧截断，两个 completion 共享剩余预算。这样 chosen / rejected
+        始终在完全相同的 prompt 条件下计算概率。
+        """
+        max_completion_length = max(len(chosen_completion), len(rejected_completion))
+        if len(prompt_ids) + max_completion_length <= self.max_length:
+            return prompt_ids, chosen_completion, rejected_completion
+
+        prompt_budget = min(len(prompt_ids), self.max_length // 2)
+        prompt_ids = prompt_ids[-prompt_budget:]
+        completion_budget = self.max_length - len(prompt_ids)
+
+        chosen_completion = self._truncate_completion(chosen_completion, completion_budget)
+        rejected_completion = self._truncate_completion(rejected_completion, completion_budget)
+        return prompt_ids, chosen_completion, rejected_completion
 
 
 
     def __getitem__(self,index):
         item = self.items[index]
 
-        chosen_ids,chosen_mask = self.encode_chat(item["chosen"])
-        rejected_ids,rejected_mask = self.encode_chat(item["rejected"])
+        chosen_prompt, chosen_completion = self._encode_chat_parts(item["chosen"])
+        rejected_prompt, rejected_completion = self._encode_chat_parts(item["rejected"])
+
+        if chosen_prompt != rejected_prompt:
+            raise ValueError(f"DPO 样本 {index} 的 chosen / rejected prompt 不一致")
+
+        prompt_ids, chosen_completion, rejected_completion = self._truncate_pair(
+            chosen_prompt,
+            chosen_completion,
+            rejected_completion,
+        )
+
+        chosen_ids = prompt_ids + chosen_completion
+        rejected_ids = prompt_ids + rejected_completion
+        chosen_mask = [0] * len(prompt_ids) + [1] * len(chosen_completion)
+        rejected_mask = [0] * len(prompt_ids) + [1] * len(rejected_completion)
 
         return {
-            "chosen_ids" : chosen_ids,
-            "chosen_mask" : chosen_mask,
-            "rejected_ids" : rejected_ids,
-            "rejected_mask" : rejected_mask
+            "chosen_ids" : torch.tensor(chosen_ids, dtype=torch.long),
+            "chosen_mask" : torch.tensor(chosen_mask, dtype=torch.long),
+            "rejected_ids" : torch.tensor(rejected_ids, dtype=torch.long),
+            "rejected_mask" : torch.tensor(rejected_mask, dtype=torch.long)
         }
