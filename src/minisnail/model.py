@@ -7,6 +7,7 @@ from einops import rearrange, einsum
 
 from minisnail.config import SnailConfig
 from minisnail.debug import console
+from minisnail.chat_protocol import encode_chat_prompt
 
 def init_model(config: SnailConfig, model_path: str = None, device=None, dtype=None):
     '''使用 config 初始化模型, 可以从 model_path 加载模型参数'''
@@ -603,22 +604,18 @@ class SnailModel(nn.Module):
             cache_len += 1
 
     def chat(self, message, tokenizer, history=None, **kwargs):
-        messages = history or []
+        # Copy caller-owned history instead of mutating it in place.
+        messages = list(history or [])
         messages.append({"role": "user", "content": message})
-
-        # 手动构造 prompt：用模板渲染对话，但不加 generation_prompt
-        prompt = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=False,
-        )
-        # 只加 assistant 标记，不加 <think> 标签
-        prompt += "<|im_start|>assistant\n"
 
         # 以模型参数的实际设备为准；调用方可能已通过 model.to(...) 将模型移到
         # generation.device，不能继续使用训练阶段的 system.device。
         model_device = self.embedding.weight.device
-        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(model_device)
+        input_ids = torch.tensor(
+            [encode_chat_prompt(tokenizer, messages)],
+            dtype=torch.long,
+            device=model_device,
+        )
 
         # generate() 内部现在自动使用 KV Cache
         output_ids = self.generate(input_ids,eos_token_id=tokenizer.eos_token_id,**kwargs)

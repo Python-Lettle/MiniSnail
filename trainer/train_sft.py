@@ -20,6 +20,7 @@ import torch.nn.functional as F
 
 from minisnail.dataset import SFTDataset, get_dataloader, get_epoch_dataloader
 from minisnail.functions import apply_optimizer_step
+from minisnail.chat_protocol import CHAT_PROTOCOL_VERSION
 from minisnail.tokenizer import get_tokenizer
 from minisnail.config import SnailConfig
 from minisnail.util import setup_seed, restore_rng_state, load_config, print_train_config
@@ -324,6 +325,16 @@ def validate_sft_context_length(dataset_length: int, model_length: int) -> None:
             f"请用相同的 --max_length 重新预处理，拒绝以错误配置继续训练"
         )
 
+
+def validate_sft_protocol(meta: dict | None) -> None:
+    """Reject legacy shards whose label mask/template semantics are unknown."""
+    actual = meta.get("chat_protocol") if meta else None
+    if actual != CHAT_PROTOCOL_VERSION:
+        raise ValueError(
+            f"SFT 数据协议为 {actual!r}，当前要求 {CHAT_PROTOCOL_VERSION!r}；"
+            "请重新运行 scripts/preprocess_sft_data.py，不能混用旧分片"
+        )
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='./config.json')
@@ -354,6 +365,10 @@ if __name__ == '__main__':
     full_dataset = SFTDataset(data_dir=args.data_dir)
 
     meta = load_sft_meta(args.data_dir)
+    try:
+        validate_sft_protocol(meta)
+    except ValueError as e:
+        raise SystemExit(f"[error] {e}") from e
     if meta is not None:
         console.print(f"[Data] 预处理: 输入 {meta.get('total_input_samples')} 条 -> 保留 "
                       f"{meta.get('num_samples')} 条 | 分片 {meta.get('num_shards')} 个 | "

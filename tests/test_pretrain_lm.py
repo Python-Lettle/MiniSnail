@@ -1,7 +1,6 @@
 import os
 import glob
 import argparse
-from re import T
 import torch
 import time
 from typing import IO, BinaryIO
@@ -35,7 +34,7 @@ def load_checkpoint(
 def generate_text(model: SnailModel, tokenizer: PreTrainedTokenizer, prompt: str, max_tokens: int = 512, config: SnailConfig = None, device: torch.device = None):
     '''Generate text output by the model.
     '''
-    device = torch.device(config.system.device) if device is None else device
+    device = torch.device(config.generation.device) if device is None else device
     
     model.to(device)
     model.eval()
@@ -50,7 +49,7 @@ def generate_text(model: SnailModel, tokenizer: PreTrainedTokenizer, prompt: str
     with torch.no_grad():
         output_ids_tensor = model.generate(
             prompt_tensor,
-            max_tokens=config.generation.max_tokens,
+            max_tokens=max_tokens,
             temperature=config.generation.temperature,
             top_k=config.generation.top_k,
             top_p=config.generation.top_p,
@@ -75,7 +74,7 @@ def generate_text(model: SnailModel, tokenizer: PreTrainedTokenizer, prompt: str
 def streaming_generate_text(model: SnailModel, tokenizer: PreTrainedTokenizer, prompt: str, max_tokens: int = 512, config: SnailConfig = None, device: torch.device = None):
     '''Generate text output by the model.
     '''
-    device = torch.device(config.system.device) if device is None else device
+    device = torch.device(config.generation.device) if device is None else device
 
     prompt_ids: list[int] = [tokenizer.bos_token_id] + tokenizer(prompt)['input_ids']
     prompt_tensor: torch.Tensor = torch.tensor([prompt_ids], dtype=torch.long, device=device)
@@ -84,7 +83,7 @@ def streaming_generate_text(model: SnailModel, tokenizer: PreTrainedTokenizer, p
     with torch.no_grad():
         for next_token_id in model.streaming_generate(
             prompt_tensor,
-            max_tokens=config.generation.max_tokens,
+            max_tokens=max_tokens,
             temperature=config.generation.temperature,
             top_k=config.generation.top_k,
             top_p=config.generation.top_p,
@@ -141,9 +140,7 @@ def batch_eval(models_dir: str, config: SnailConfig, tokenizer: PreTrainedTokeni
     for mf in model_files:
         emit(f"  - {os.path.basename(mf)} (step {extract_step(mf)})")
 
-    # 固定随机种子, 保证采样结果可复现
-    torch.manual_seed(config.system.seed)
-    device = torch.device(config.system.device)
+    device = torch.device(config.generation.device)
 
     for mf in model_files:
         step = extract_step(mf)
@@ -152,12 +149,15 @@ def batch_eval(models_dir: str, config: SnailConfig, tokenizer: PreTrainedTokeni
         emit(f"模型 step={step}  ({os.path.basename(mf)})")
         emit(f"{'=' * 60}")
 
-        model = init_model(config, model_path=mf)
+        model = init_model(config, model_path=mf, device=device)
         model.eval()
-        model.to(device)
 
         with torch.no_grad():
-            for p in prompts:
+            for prompt_index, p in enumerate(prompts):
+                # 每个 prompt 独立重置 RNG，防止前一模型提前停止后影响后续比较。
+                torch.manual_seed(config.system.seed + prompt_index)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(config.system.seed + prompt_index)
                 input_ids: list[int] = [tokenizer.bos_token_id] + tokenizer(p)['input_ids']
                 prompt_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
                 output_ids_tensor = model.generate(
@@ -185,8 +185,8 @@ def batch_eval(models_dir: str, config: SnailConfig, tokenizer: PreTrainedTokeni
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Load pretrain model from checkpoint.')
-    # parser.add_argument('--model', type=str, default='./model/new_pretrain/pretrain_lm_174279.pt', help='Path to the model file.')
-    parser.add_argument('--model', type=str, default='./model/new_pretrain/pretrain_lm_216534.pt', help='Path to the model file.')
+    parser.add_argument('--model', type=str, default=None,
+                        help='Path to the model file (default: config.generation.model_path).')
     parser.add_argument('--eval_dir', type=str, default=None, help='批量评测目录: 遍历 <dir>/pretrain_lm_*.pt 并逐一生成文本对比.')
     args = parser.parse_args()
     
@@ -197,14 +197,13 @@ if __name__ == '__main__':
         batch_eval(args.eval_dir, config, tokenizer)
         raise SystemExit(0)
     # The model will load the weight from config.training.from_weight
-    model_path: str = args.model
-    model: SnailModel = init_model(config, model_path=model_path)
+    model_path: str = args.model or config.generation.model_path
+    device = torch.device(config.generation.device)
+    model: SnailModel = init_model(config, model_path=model_path, device=device)
     
     console.print("[yellow]Loading model from weight:", model_path)
     
     model.eval()
-    model.to(device=torch.device(config.system.device))
-    
     prompt: str = ""
 
     # Pre-Training Test

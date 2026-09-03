@@ -6,10 +6,10 @@ import numpy as np
 from tqdm import tqdm
 from transformers import AutoTokenizer
 import re
-# chat_template 给每条 assistant 注入的是
-#   <|im_start|>assistant\n<think>\n{推理}\n</think>\n\n{正文}<|im_end|>\n
-# 删掉 think 块时要把模板紧跟其后的两个换行一起吃掉, 否则留下 <|im_start|>assistant\n\n\n{正文},
-# 与推理端 <|im_start|>assistant\n 差两个空行。只吃换行不吃空格, 避免误伤正文的缩进。
+from minisnail.chat_protocol import CHAT_PROTOCOL_VERSION, encode_sft_example
+
+# MiniSnail 当前协议不训练 thinking 块。只移除数据正文中显式存在的块；
+# tokenizer 自带 chat_template 不再参与 SFT、DPO 或推理编码。
 pattern = re.compile(r'<think>.*?</think>\n*', re.S)
 
 REPLACE_RULES = []
@@ -148,10 +148,7 @@ def load_filter_words(path):
     return words
 
 def remove_think(text):
-    text = re.sub(pattern, "", text)
-    # 不再 strip(): 模板渲染结果自带结尾换行, 那是消息之间的分隔符,
-    # 之前 strip 掉它导致训练侧是 <|im_end|><|im_start|>assistant, 而推理侧是 <|im_end|>\n<|im_start|>assistant
-    return text
+    return re.sub(pattern, "", text)
 
 def clean_content(text, replace_rules=None, filter_words=None):
     if not isinstance(text,str):
@@ -175,7 +172,6 @@ def clean_content(text, replace_rules=None, filter_words=None):
             )
 
     # ----------去think----------
-    # 保留模板的换行结构 (结尾换行由 build_sample 统一处理), 不要用 strip 抹掉
     text = remove_think(text)
     return text
 
@@ -197,79 +193,40 @@ def build_sample(messages, tokenizer, max_length, replace_rules=None, filter_wor
     返回 (input_ids, labels); 样本不可用时返回 (None, None)。
     丢弃原因累加进 stats (可选): filtered / too_long / no_supervision / kept
     """
-    input_ids = []
-    labels = []
-    has_supervision = False
-
-    for msg in messages:
-        role = msg["role"]
-        content = msg["content"]
-        # 单轮chat template
-        text = tokenizer.apply_chat_template(
-            [
-                {
-                    "role": role,
-                    "content": content
-                }
-            ],
-            tokenize=False,
-            add_generation_prompt=False,
-        )
-        text = clean_content(text, replace_rules=replace_rules, filter_words=filter_words)
-        # 命中过滤词则跳过整个样本，避免破坏多轮对话结构
-        if text is None:
+    cleaned_messages = []
+    for message in messages:
+        if not isinstance(message, dict):
             if stats is not None:
                 stats["filtered"] += 1
             return None, None
-
-        # 模板渲染结果形如 "<|im_start|>role\n{正文}<|im_end|>\n":
-        # 结尾那个 \n 是下一条消息的分隔符, 这里先去掉, 改由下面统一在消息之间补一个 \n,
-        # 使训练侧恰好是 "<|im_end|>\n<|im_start|>assistant", 与推理端 model.chat() 拼的 prompt 一致。
-        text = text.rstrip("\n")
-
-        body_ids = tokenizer(text, add_special_tokens=False).input_ids
-
-        # 首条消息之外补分隔换行。
-        # 注意: \n 夹在 <|im_end|>(特殊 token) 与 <|im_start|>(特殊 token) 之间,
-        # BPE 不会跨越特殊 token 合并, 所以这里单独补的 \n 与整段一次性编码的切分结果一致。
-        sep_ids = [] if not input_ids else tokenizer("\n", add_special_tokens=False).input_ids
-
-        ids = sep_ids + body_ids
-        # 单条消息已超出整个上下文窗口时，必须丢弃整条对话。
-        # 如果只跳过当前消息，后续 assistant 回复会在缺少对应 prompt 的
-        # 情况下进入训练集，导致样本语义错位。
-        if len(ids) > max_length:
+        content = clean_content(
+            message.get("content"),
+            replace_rules=replace_rules,
+            filter_words=filter_words,
+        )
+        # A filter hit or a non-string content invalidates the full conversation.
+        if content is None or not isinstance(content, str):
             if stats is not None:
-                stats["too_long"] += 1
+                stats["filtered"] += 1
             return None, None
+        cleaned_messages.append({"role": message.get("role"), "content": content})
 
-        # 逐条累加后超预算则整条样本丢弃。
-        # 不能只丢当前消息后继续: 一是丢掉 assistant 会留下 labels 全 -100 的空样本,
-        # 二是多行累加超长会让行长 > max_length, 最终 np.array 因行长不一致而抛 ValueError。
-        # 也不能截断: 截断会切掉结尾的 <|im_end|>, 模型就学不会主动停止。
-        if len(input_ids) + len(ids) > max_length:
+    try:
+        input_ids, labels = encode_sft_example(tokenizer, cleaned_messages)
+    except ValueError as error:
+        if "没有可监督" in str(error):
             if stats is not None:
-                stats["too_long"] += 1
+                stats["no_supervision"] += 1
             return None, None
+        raise
 
-        input_ids.extend(ids)
-
-        if role == "assistant":
-            # 分隔换 \n 是推理端 prompt 的一部分 (由 model.chat() 手写拼出), 不计入 loss;
-            # <|im_start|>assistant\n 这个头部保留监督, 沿用原有约定
-            labels.extend([-100] * len(sep_ids) + body_ids)
-            has_supervision = True
-        else:
-            labels.extend([-100] * len(ids))
-
-    # assistant 全部被丢弃时 labels 全是 -100: 这种样本不产生任何梯度,
-    # 却照样占 batch 位置、稀释 loss 统计, 验证时还会算出 nan
-    if not has_supervision:
+    # Never cut a conversation: truncation may remove an assistant end marker or
+    # leave a response without its prompt, creating a different protocol.
+    if len(input_ids) > max_length:
         if stats is not None:
-            stats["no_supervision"] += 1
+            stats["too_long"] += 1
         return None, None
 
-    # 走到这里 len(input_ids) <= max_length, pad_len 必为非负
     pad_len = max_length - len(input_ids)
     input_ids += [tokenizer.pad_token_id] * pad_len
     labels += [-100] * pad_len
@@ -438,6 +395,7 @@ def process(data_path,tokenizer, max_length, output_dir, num_samples=None,
         "total_lines_in_file": int(n_lines),
         "total_input_samples": int(n_read),
         "tool_policy": tool_policy,
+        "chat_protocol": CHAT_PROTOCOL_VERSION,
         "stats": stats,
     }
     with open(os.path.join(output_dir, "sft_meta.json"), "w", encoding="utf-8") as f:

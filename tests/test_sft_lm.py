@@ -9,6 +9,7 @@ from minisnail.config import SnailConfig
 from minisnail.model import init_model, SnailModel
 from minisnail.tokenizer import get_tokenizer
 from minisnail.debug import console
+from minisnail.chat_protocol import encode_chat_prompt
 
 def load_checkpoint(
     src: str | os.PathLike | BinaryIO | IO[bytes],
@@ -41,16 +42,11 @@ def chat_generate(model: SnailModel, tokenizer: PreTrainedTokenizer, message: st
         (answer, n_tokens, stopped_early)
     """
     messages = [{"role": "user", "content": message}]
-
-    # 与 model.chat / SFT 训练编码一致的模板: 渲染对话 + assistant 标记
-    prompt = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=False,
+    input_ids = torch.tensor(
+        [encode_chat_prompt(tokenizer, messages)],
+        dtype=torch.long,
+        device=model.embedding.weight.device,
     )
-    prompt += "<|im_start|>assistant\n"
-    # 模板以 <|im_start|> (bos, id=1) 开头, tokenizer 不会重复添加 bos
-    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
 
     max_tokens = max_tokens or config.generation.max_tokens
     if do_sample is None:
@@ -105,7 +101,10 @@ def auto_test(model: SnailModel, tokenizer: PreTrainedTokenizer, config: SnailCo
 
     n_stopped = 0
     with torch.no_grad():
-        for p in prompts:
+        for prompt_index, p in enumerate(prompts):
+            torch.manual_seed(config.system.seed + prompt_index)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(config.system.seed + prompt_index)
             answer, n_tokens, stopped_early, gen_time = chat_generate(
                 model, tokenizer, p, config, max_tokens=max_tokens, do_sample=do_sample)
             n_stopped += int(stopped_early)
@@ -131,13 +130,14 @@ def batch_eval(models: list[str], config: SnailConfig, tokenizer: PreTrainedToke
         console.print(text)
 
     emit(f"Evaluating {len(models)} SFT model(s) with {len(prompts)} prompts each")
+    device = torch.device(config.generation.device)
     for mf in models:
         emit("")
         emit(f"{'=' * 60}")
         emit(f"模型: {os.path.basename(mf)}")
         emit(f"{'=' * 60}")
 
-        model = init_model(config, model_path=mf)
+        model = init_model(config, model_path=mf, device=device)
         model.eval()
 
         auto_test(model, tokenizer, config, prompts, max_tokens=max_tokens,
@@ -162,8 +162,8 @@ if __name__ == '__main__':
         pass
 
     parser = argparse.ArgumentParser(description='Test model with chat template.')
-    parser.add_argument('--model', type=str, default='./model/new_dpo/dpo_new.pt',
-                        help='Path to the model weight file.')
+    parser.add_argument('--model', type=str, default=None,
+                        help='Path to model weights (default: config.generation.model_path).')
     parser.add_argument('--eval_dir', type=str, default=None,
                         help='批量评测目录: 遍历 <dir>/sft_*.pt 并逐一对话评测对比.')
     parser.add_argument('--config', type=str, default='./config.json', help='Path to config JSON file.')
@@ -189,12 +189,16 @@ if __name__ == '__main__':
                    do_sample=False if args.greedy else None)
         raise SystemExit(0)
 
-    model_path: str = args.model
+    model_path: str = args.model or config.generation.model_path
     if not os.path.exists(model_path):
         console.print(f"[red]Model file not found: {model_path}")
         raise SystemExit(1)
 
-    model: SnailModel = init_model(config, model_path=model_path)
+    model: SnailModel = init_model(
+        config,
+        model_path=model_path,
+        device=torch.device(config.generation.device),
+    )
     console.print("[yellow]Loading model from weight:", model_path)
 
     model.eval()

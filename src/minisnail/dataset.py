@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 from transformers import PreTrainedTokenizer
 
 from minisnail.debug import console
+from minisnail.chat_protocol import encode_assistant_completion, encode_chat_prompt
 
 def get_dataloader(
     dataset: Dataset,
@@ -287,31 +288,14 @@ class DPODataset(Dataset):
         return len(self.items)
 
     def _encode_chat_parts(self, messages):
-        """
-        手动渲染模板 (与 model.chat / SFT 预处理一致, 不带 think 块):
-            <|im_start|>role\n{content}<|im_end|>\n
-
-        prompt     = 除最后一条 assistant 外的全部消息 + <|im_start|>assistant\n
-        completion = 最后一条 assistant 的正文 + <|im_end|> (生成到此停止, 不含尾随换行)
-
-        prompt / completion 分别编码:
-        1. tokenizer 自带的 chat_template 是 Qwen3 风格, 会插入 <|im_start|>assistant\n<|think|>...
-           与 SFT 训练/推理格式不一致, 偏好无法迁移到 model.chat 推理端;
-        2. 分别编码保证 mask 边界与 token 严格对齐 (两段拼接文本
-           分别整体 tokenize, 不存在句中/句尾 BPE 切分差异导致的边界漂移)。
-        """
+        """Return canonical prompt/completion IDs for one preference branch."""
         if not messages or messages[-1].get("role") != "assistant":
             raise ValueError("DPO 对话必须以 assistant 消息结尾")
 
-        prompt_text = ""
-        for message in messages[:-1]:
-            prompt_text += f"<|im_start|>{message['role']}\n{message['content']}<|im_end|>\n"
-        prompt_text += "<|im_start|>assistant\n"
-        completion_text = f"{messages[-1]['content']}<|im_end|>"
-
-        prompt_ids = self.tokenizer(prompt_text, add_special_tokens=False)['input_ids']
-        completion_ids = self.tokenizer(completion_text, add_special_tokens=False)['input_ids']
-
+        prompt_ids = encode_chat_prompt(self.tokenizer, messages[:-1])
+        completion_ids = encode_assistant_completion(
+            self.tokenizer, messages[-1].get("content")
+        )
         return prompt_ids, completion_ids
 
     @staticmethod
