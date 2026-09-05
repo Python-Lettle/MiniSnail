@@ -40,6 +40,9 @@ def render_chat_prompt(messages: Sequence[Mapping[str, Any]]) -> str:
 
 
 def _encode(tokenizer, text: str) -> list[int]:
+    """使用 Tokenizer 编码文本为 token IDs 列表 \n
+    输出: token IDs 列表 [1, 2, 3, ...]
+    """
     encoded = tokenizer(text, add_special_tokens=False)
     input_ids = encoded["input_ids"] if isinstance(encoded, Mapping) else encoded.input_ids
     return list(input_ids)
