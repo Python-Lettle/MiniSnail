@@ -118,7 +118,10 @@ def train_dpo(config: SnailConfig, save_model_dir: str, run: wandb.Run, checkpoi
     # Training loop
     steps_per_epoch = math.ceil(len(dataset) / config.training.batch_size)
     total_steps = steps_per_epoch * epochs
-    total_optimizer_steps = math.ceil(total_steps / accumulation_steps)
+    total_optimizer_steps = config.resolve_training_schedule(steps_per_epoch)
+    console.print(f"Scheduler: optimizer_steps={total_optimizer_steps}, "
+                  f"warmup_iters={config.scheduler.warmup_iters}, "
+                  f"cosine_cycle_iters={config.scheduler.cosine_cycle_iters}")
     console.print(f"Total steps: {total_steps}")
 
     # checkpoint 语义 (与 train_sft 一致): epoch = 断点所在 epoch, last_step = 该 epoch 内已完成的 batch 数

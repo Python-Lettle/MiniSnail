@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Optional
 import json
+import warnings
 import torch
 
 @dataclass
@@ -42,6 +43,18 @@ class TrainingConfig:
     use_wandb: bool = True
     use_compile: bool = True
     use_amp: bool = True
+    # 阶段元数据；训练入口仍由 trainer 脚本决定。
+    stage: str | None = None
+    # 配置兼容字段，当前训练循环尚未实现独立的定期 checkpoint。
+    checkpoint_interval: int | None = None
+
+    def __post_init__(self):
+        if self.stage is not None and self.stage not in ("pretrain", "sft", "dpo"):
+            raise ValueError("training.stage 必须是 pretrain、sft、dpo 或 null")
+        if self.checkpoint_interval is not None and (
+            type(self.checkpoint_interval) is not int or self.checkpoint_interval <= 0
+        ):
+            raise ValueError("training.checkpoint_interval 必须是正整数或 null")
 
 @dataclass
 class SchedulerConfig:
@@ -50,6 +63,17 @@ class SchedulerConfig:
     min_learning_rate: float = 0.00005
     warmup_iters: int = 600
     cosine_cycle_iters: int = 6000
+    # 默认保留旧配置的显式步数行为。
+    auto_steps: bool = False
+    warmup_ratio: float = 0.1
+
+    def __post_init__(self):
+        if type(self.auto_steps) is not bool:
+            raise ValueError("scheduler.auto_steps 必须是布尔值")
+        if (isinstance(self.warmup_ratio, bool)
+                or not isinstance(self.warmup_ratio, (int, float))
+                or not 0 <= self.warmup_ratio < 1):
+            raise ValueError("scheduler.warmup_ratio 必须在 [0, 1) 范围内")
 
 @dataclass
 class SystemConfig:
@@ -88,6 +112,31 @@ class SnailConfig:
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
+    def resolve_training_schedule(self, batches_per_epoch: int) -> int:
+        """按完整训练计划解析调度，返回 optimizer 更新次数。
+
+        当前训练器跨 epoch 累积梯度，仅在训练结束提交残余窗口。
+        续训也传入完整 epoch 的批次数，不用剩余批次数重启调度。
+        cosine_cycle_iters 是包含 warmup 的终点，不是衰减段的长度。
+        """
+        for name, value in (
+            ("batches_per_epoch", batches_per_epoch),
+            ("training.epochs", self.training.epochs),
+            ("training.accumulation_steps", self.training.accumulation_steps),
+        ):
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{name} 必须是正整数")
+        total_batches = batches_per_epoch * self.training.epochs
+        accumulation = self.training.accumulation_steps
+        total_updates = (total_batches + accumulation - 1) // accumulation
+        if self.scheduler.auto_steps:
+            self.scheduler.cosine_cycle_iters = total_updates
+            # 向下取整，至少为 cosine 留一个更新位置，单步训练不 warmup。
+            self.scheduler.warmup_iters = min(
+                total_updates - 1, int(total_updates * self.scheduler.warmup_ratio)
+            )
+        return total_updates
+
     def get_torch_dtype(self):
         """Get torch.dtype from system.dtype string. Returns (model_dtype, amp_dtype).
 
@@ -110,7 +159,7 @@ class SnailConfig:
         if "valid_samples" not in training_dict and "valid_batches" in training_dict:
             training_dict["valid_samples"] = training_dict["valid_batches"]
         training_dict.pop("valid_batches", None)
-        return cls(
+        config = cls(
             tokenizer=TokenizerConfig(**config_dict.get("tokenizer", {})),
             model=ModelConfig(**config_dict.get("model", {})),
             training=TrainingConfig(**training_dict),
@@ -119,6 +168,18 @@ class SnailConfig:
             generation=GenerationConfig(**config_dict.get("generation", {})),
             wandb=WandbConfig(**config_dict.get("wandb", {})),
         )
+        inactive_options = []
+        if config.training.checkpoint_interval is not None:
+            inactive_options.append("training.checkpoint_interval")
+        if inactive_options:
+            warnings.warn(
+                "以下配置已保留，但当前训练脚本尚未实现："
+                + ", ".join(inactive_options)
+                + "; 这些选项不会改变当前训练行为",
+                UserWarning,
+                stacklevel=2,
+            )
+        return config
     
     @classmethod
     def from_json(cls, json_path: str) -> "SnailConfig":

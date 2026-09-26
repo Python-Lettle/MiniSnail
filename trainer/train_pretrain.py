@@ -132,9 +132,10 @@ def initialize_pretrain_model(
 def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader: DataLoader, model: nn.Module, optimizer: Optimizer, save_model_dir: str = "./output", checkpoint: dict[str, Any] | None = None, run: wandb.Run | None = None):
     # 计算 epoch 和 step 的数量
     total_steps = len(train_dataloader) * config.training.epochs
-    total_optimizer_steps = (
-        total_steps + config.training.accumulation_steps - 1
-    ) // config.training.accumulation_steps
+    total_optimizer_steps = config.resolve_training_schedule(len(train_dataloader))
+    console.print(f"Scheduler: optimizer_steps={total_optimizer_steps}, "
+                  f"warmup_iters={config.scheduler.warmup_iters}, "
+                  f"cosine_cycle_iters={config.scheduler.cosine_cycle_iters}")
     console.print(f"Train dataset samples: {len(train_dataloader.dataset)} \n"
                f"Val dataset samples: {len(val_dataloader.dataset)} \n"
                f"Total epochs: {config.training.epochs} \n"
