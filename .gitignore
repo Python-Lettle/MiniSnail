@@ -243,6 +243,9 @@ output/
 # 单元测试脚本暂时不上传
 tests/unit
 
+# 配置项不上传
+configs/
+
 # HuggingFace
 hf-release/
 

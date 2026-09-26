@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 from typing import Any
+import warnings
 
 
 IM_START = "<|im_start|>"
@@ -120,3 +121,24 @@ def encode_sft_example(
     if supervised_tokens == 0:
         raise ValueError("对话中没有可监督的 assistant token")
     return input_ids, labels
+
+def fit_chat_messages(tokenizer, messages, max_length, reserve_tokens=1):
+    """Drop complete oldest turns, retaining system messages and the current turn.
+
+    A current turn that cannot fit is rejected; it is never cut mid-message.
+    Returns a new list, so caller-owned history is not changed.
+    """
+    if reserve_tokens < 1 or max_length <= reserve_tokens:
+        raise ValueError("上下文预算不足，需为回答预留 token")
+    retained = list(messages)
+    original_size = len(retained)
+    while len(encode_chat_prompt(tokenizer, retained)) + reserve_tokens > max_length:
+        user_positions = [i for i, m in enumerate(retained) if m.get("role") == "user"]
+        if len(user_positions) < 2:
+            raise ValueError("当前问题和 system 指令超出上下文预算，请缩短输入或减少生成长度")
+        first, second = user_positions[:2]
+        retained = retained[:first] + [m for m in retained[first:second]
+                                       if m.get("role") == "system"] + retained[second:]
+    if len(retained) != original_size:
+        warnings.warn("上下文预算不足，已移除最早的完整对话轮次", UserWarning, stacklevel=2)
+    return retained

@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,7 +8,7 @@ from einops import rearrange, einsum
 
 from minisnail.config import SnailConfig
 from minisnail.debug import console
-from minisnail.chat_protocol import encode_chat_prompt
+from minisnail.chat_protocol import encode_chat_prompt, fit_chat_messages
 
 def init_model(config: SnailConfig, model_path: str = None, device=None, dtype=None):
     '''使用 config 初始化模型, 可以从 model_path 加载模型参数'''
@@ -283,17 +284,28 @@ def _no_repeat_ngram_mask(next_token_logits, seq, no_repeat_ngram_size):
         seq: list[int] 当前完整 token 序列 (prompt + 已生成)
         no_repeat_ngram_size: n-gram 长度, <=1 表示关闭
     """
+    # n-gram 大小
     n = no_repeat_ngram_size
+    # 如果 n-gram 大小无效, 不做处理, 直接返回
+    # 如果 seq 长度不足 n, 不做处理, 也直接返回
     if not n or n < 2 or len(seq) < n:
         return next_token_logits
+    
+    # 最后 n-1 个 token 作为前缀, 查找所有与前缀匹配的 token
+    # 把这些 token 的 logit 置为 -inf
+
+    # 取出当前序列最后的 n - 1 个 token
     prefix = tuple(seq[-(n - 1):])
+    # 查找历史上相同前缀后面接过哪些 token
     banned = {
         seq[i + n - 1]
         for i in range(len(seq) - n + 1)
         if tuple(seq[i:i + n - 1]) == prefix
     }
+    # 把被禁止 token 的分数设为负无穷
     for t in banned:
         next_token_logits[:, t] = float("-inf")
+    # 返回处理后的 logits
     return next_token_logits
 
 
@@ -303,11 +315,16 @@ def _apply_repetition_penalty(next_token_logits, seen_token_ids, repetition_pena
     正 logit 除以 penalty，负 logit 乘以 penalty，保证两种情况都会降低
     token 的选中概率。seen_token_ids 使用集合去重，避免按出现次数重复惩罚。
     """
+    # 如果 penalty 无效, 不做处理, 直接返回
+    # 如果 seen_token_ids 为空, 不做处理, 直接返回
     if repetition_penalty <= 1.0 or not seen_token_ids:
         return next_token_logits
 
+    # 取出所有已出现过的 token 的 logit
     token_ids = list(seen_token_ids)
     token_logits = next_token_logits[:, token_ids]
+    
+    # 对每个 token 的 logit 应用 penalty
     next_token_logits[:, token_ids] = torch.where(
         token_logits < 0,
         token_logits * repetition_penalty,
@@ -402,211 +419,167 @@ class SnailModel(nn.Module):
             return output, present_kv
         return output
 
-    @torch.no_grad()
-    def generate(self, 
-            X: torch.Tensor,
-            max_tokens=512,
-            temperature=0.85,
-            repetition_penalty=1.2,
-            top_k=50,
-            top_p=0.9,
-            eos_token_id=2,
-            do_sample=True,
-            skip_prompt=True,
-            no_repeat_ngram_size=0,
-        ):
+    def _generate_tokens(self, X: torch.Tensor, max_tokens: int = 512, temperature: float = 0.85,
+                            repetition_penalty: float = 1.2, top_k: int = 50, top_p: float = 0.9,
+                            eos_token_id: int = 2, do_sample: bool = True, no_repeat_ngram_size: int = 0,
+                            suppress_token_ids=(), allow_context_rollover: bool = True):
+        # 简写参数
+        context_length = self.config.model.context_length
+        # 检查输入参数
         if X.dim() == 1:
             X = X.unsqueeze(0)
-        X = X.long()
-        original_length = X.size(-1)
-
-        # 1. Prompt 长度超过 context length
-        if X.size(-1) > self.config.model.context_length:
-            X = X[:, -self.config.model.context_length:]
+        if X.dim() != 2 or X.shape[0] != 1 or X.shape[1] == 0:
+            raise ValueError("生成接口需要一条非空输入，batch size 必须为 1")
+        if X.shape[1] > context_length:
+            raise ValueError("输入超过上下文窗口；请先按完整消息裁剪或缩短预训练提示")
+        if not isinstance(max_tokens, int) or max_tokens < 1:
+            raise ValueError("max_tokens 必须为正整数")
+        if not math.isfinite(temperature) or (do_sample and temperature <= 0):
+            raise ValueError("采样 temperature 必须为有限正数；贪婪解码请使用 do_sample=False")
+        if not isinstance(top_k, int) or top_k < 0 or not 0 < top_p <= 1:
+            raise ValueError("top_k 必须为非负整数，top_p 必须在 (0, 1] 内")
+        if not math.isfinite(repetition_penalty) or repetition_penalty < 1:
+            raise ValueError("repetition_penalty 必须为不小于 1 的有限值")
+        if not isinstance(no_repeat_ngram_size, int) or no_repeat_ngram_size < 0:
+            raise ValueError("no_repeat_ngram_size 必须为非负整数")
         
-        # 2. Prefill
-        # 第一次把整个 prompt 输入模型
-        # 得到：logits + 每一层的 KV Cache
-        logits, past_kv = self.forward(X, use_cache=True, start_pos=0)
+        # forbidden 保存明确禁止输出的 token ID, 例如某些特殊控制符
+        forbidden = set(suppress_token_ids)
+        # 将 EOS 移除, 避免禁止列表把 EOS 也屏蔽掉
+        forbidden.discard(eos_token_id)
         
-        generated_ids = []
-        seen_token_ids = set(X[0].tolist())
+        # 检查禁止列表中的 token ID 是否超出词表范围
+        if any(token_id < 0 or token_id >= self.config.model.vocab_size for token_id in forbidden):
+            raise ValueError("suppress_token_ids 超出词表范围")
 
-        # 当前 cache 中有多少 token
-        cache_len = X.size(-1)
+        # 确保 X 的类型和设备与模型参数一致
+        X = X.to(device=self.embedding.weight.device, dtype=torch.long)
 
-        # 3. Autoregressive Generation
-        for _ in range(max_tokens):
-            # Sampling
-            if do_sample:
-                next_token_logits = logits[:, -1] / temperature
-                # Repetition Penalty
-                next_token_logits = _apply_repetition_penalty(
-                    next_token_logits, seen_token_ids, repetition_penalty
-                )
-                # n-gram 抑制放在 top_k/top_p 之前, 保证 top_k 始终保留候选, 避免 logits 全 -inf
-                next_token_logits = _no_repeat_ngram_mask(next_token_logits, X[0].tolist(), no_repeat_ngram_size)
-                # Top-K
-                if top_k:
-                    topk_values, _ = torch.topk(next_token_logits, min(top_k, next_token_logits.size(-1)))
-                    threshold = topk_values[:, -1].unsqueeze(-1)
-                    next_token_logits = next_token_logits.masked_fill(
-                        next_token_logits < threshold, float("-inf")
-                    )
-                # Top-P
-                if top_p < 1.0:
-                    next_token_logits = top_p_filtering(next_token_logits, top_p)
-                # Sample
-                probs = F.softmax(next_token_logits, dim=-1)
-                next_token_id = torch.multinomial(probs, 1)
-            else:
-                # Greedy Decoding
-                next_token_logits = logits[:, -1]
-                next_token_logits = _apply_repetition_penalty(
-                    next_token_logits, seen_token_ids, repetition_penalty
-                )
-                next_token_logits = _no_repeat_ngram_mask(next_token_logits, X[0].tolist(), no_repeat_ngram_size)
-                next_token_id = next_token_logits.argmax(dim=-1, keepdim=True)
+        # 初始化生成记录
+        generated = []
+        self.last_generation_info = {"stop_reason": "length", "generated_ids": generated}
+        # 完整提示词送进模型
+        with torch.no_grad():
+            # 第一次把整个 prompt 输入模型
+            # 得到：
+            #   logits: 各个位置对下一个 token 的预测分数
+            #   past_kv: 已处理 token 的注意力 Key、Value 缓存
+            logits, past_kv = self.forward(X, use_cache=True, start_pos=0)
+            cache_len = X.shape[1]
 
-            # 遇到 EOS 停止
-            if eos_token_id is not None and next_token_id.item() == eos_token_id:
-                break
+            for step in range(max_tokens):
+                # 为了预测提示词后面的第一个新 token，只需要最后一个位置的输出
+                # .float() 转成 float32
+                # .clone() 创建独立副本，方便后面修改分数。
+                scores = logits[:, -1].float().clone()
+                # 检查 scores, 允许负无穷, -inf 可以表示“这个 token 不可选”
+                if torch.isnan(scores).any() or torch.isposinf(scores).any():
+                    raise ValueError("模型产生非有限 logits")
 
-            generated_ids.append(next_token_id.item())
-            seen_token_ids.add(next_token_id.item())
+                # 已经生成过的普通 token 集合, 用于重复惩罚
+                seen = set(generated) - {eos_token_id} - forbidden
 
-            # 4. 将新 token 添加到序列
-            X = torch.cat((X, next_token_id), dim=-1)
+                # 对 scores 施加重复惩罚
+                scores = _apply_repetition_penalty(scores, seen, repetition_penalty)
+                scores = _no_repeat_ngram_mask(scores, generated, no_repeat_ngram_size)
 
-            # 5. Context Window 已经满了
-            # KV Cache 无法无限增长
-            # 当达到 context_length 后：
-            # 重新截取最近 context_length tokens 并重新建立 cache
-            if X.size(-1) > self.config.model.context_length:
-                X = X[:, -self.config.model.context_length:]
-                logits, past_kv = self.forward(X, use_cache=True, start_pos=0)
-                cache_len = self.config.model.context_length
-                continue
-            
-            # 6. KV Cache Decode
-            logits, past_kv = (
-                self.forward(
-                    next_token_id,
-                    past_kv=past_kv,
-                    use_cache=True,
-                    start_pos=cache_len
-                )
-            )
-            cache_len += 1
-        # 7. Construct Output
-        output_ids = torch.tensor([generated_ids], dtype=X.dtype, device=X.device)
+                # 对 scores 应用禁止列表
+                if forbidden: scores[:, list(forbidden)] = -float("inf")
 
-        if skip_prompt:
-            return output_ids
+                # 检查是否所有候选 token 都被屏蔽了
+                if not torch.isfinite(scores).any(): raise ValueError("生成规则屏蔽了所有候选 token")
 
-        return torch.cat((X[:, :original_length], output_ids), dim=-1)
+                # 采样下一个 token
+                if do_sample:
+                    # 对 scores 应用温度
+                    scores /= temperature
+                    # Top-K 过滤
+                    if top_k:
+                        threshold = torch.topk(scores, min(top_k, scores.shape[-1])).values[:, -1:]
+                        scores = scores.masked_fill(scores < threshold, -float("inf"))
+                    # Top-P 过滤
+                    scores = top_p_filtering(scores, top_p)
+                    # 计算概率
+                    probabilities = F.softmax(scores, dim=-1)
+
+                    if not torch.isfinite(probabilities).all(): raise ValueError("模型产生非有限采样概率")
+
+                    next_id = torch.multinomial(probabilities, 1)
+                else:
+                    next_id = scores.argmax(dim=-1, keepdim=True)
+
+                token = next_id.item()
+
+                if eos_token_id is not None and token == eos_token_id:
+                    self.last_generation_info["stop_reason"] = "eos"
+                    return
+                # 记录当前生成的 token
+                generated.append(token)
+                # 返回当前生成的 token
+                yield token
+                # 检查是否超过最大 token 数, 如果超过则停止生成
+                if step + 1 == max_tokens: return
+                # 更新上下文, 为下一轮预测做准备
+                X = torch.cat((X, next_id), dim=-1)
+
+                if X.shape[1] > context_length:
+                    # 如果 prompt 长度超过 context length, 则检查是否允许 rolloverver
+                    if not allow_context_rollover:
+                        self.last_generation_info["stop_reason"] = "context_length"
+                        return
+                    # 如果允许 rolloverver, 则截断上下文, 保持 context length
+                    X = X[:, -context_length:]
+                    logits, past_kv = self.forward(X, use_cache=True, start_pos=0)
+                    cache_len = context_length
+                else:
+                    logits, past_kv = self.forward(next_id, past_kv=past_kv,
+                                                  use_cache=True, start_pos=cache_len)
+                    cache_len += 1
 
     @torch.no_grad()
-    def streaming_generate(self, 
-            X: torch.Tensor,
-            max_tokens=512,
-            temperature=0.85,
-            repetition_penalty=1.2,
-            top_k=50,
-            top_p=0.9,
-            eos_token_id=2,
-            do_sample=True,
-            no_repeat_ngram_size=0,
+    def generate(self,
+            X: torch.Tensor, max_tokens=512, temperature=0.85,
+            repetition_penalty=1.2, top_k=50, top_p=0.9,
+            eos_token_id=2, do_sample=True, skip_prompt=True,
+            no_repeat_ngram_size=0, suppress_token_ids=(),
+            allow_context_rollover=True,
         ):
-        if X.dim() == 1:
-            X = X.unsqueeze(0)
-        X = X.long()
+        original: torch.Tensor = X.unsqueeze(0) if X.dim() == 1 else X
+        ids = list(self._generate_tokens(
+            X, max_tokens=max_tokens, temperature=temperature,
+            repetition_penalty=repetition_penalty, top_k=top_k, top_p=top_p,
+            eos_token_id=eos_token_id, do_sample=do_sample,
+            no_repeat_ngram_size=no_repeat_ngram_size,
+            suppress_token_ids=suppress_token_ids,
+            allow_context_rollover=allow_context_rollover,
+        ))
+        output = torch.tensor([ids], device=self.embedding.weight.device, dtype=torch.long)
+        return output if skip_prompt else torch.cat((original.to(output.device).long(), output), dim=1)
 
-        # 1. Prompt 长度超过 context length
-        if X.size(-1) > self.config.model.context_length:
-            X = X[:, -self.config.model.context_length:]
-        
-        # 2. Prefill
-        # 第一次把整个 prompt 输入模型
-        # 得到：logits + 每一层的 KV Cache
-        logits, past_kv = self.forward(X, use_cache=True, start_pos=0)
-        
-        seen_token_ids = set(X[0].tolist())
-
-        # 当前 cache 中有多少 token
-        cache_len = X.size(-1)
-
-        # 3. Autoregressive Generation
-        for _ in range(max_tokens):
-            # Sampling
-            if do_sample:
-                next_token_logits = logits[:, -1] / temperature
-                # Repetition Penalty
-                next_token_logits = _apply_repetition_penalty(
-                    next_token_logits, seen_token_ids, repetition_penalty
-                )
-                # n-gram 抑制放在 top_k/top_p 之前, 保证 top_k 始终保留候选, 避免 logits 全 -inf
-                next_token_logits = _no_repeat_ngram_mask(next_token_logits, X[0].tolist(), no_repeat_ngram_size)
-                # Top-K
-                if top_k:
-                    topk_values, _ = torch.topk(next_token_logits, min(top_k, next_token_logits.size(-1)))
-                    threshold = topk_values[:, -1].unsqueeze(-1)
-                    next_token_logits = next_token_logits.masked_fill(
-                        next_token_logits < threshold, float("-inf")
-                    )
-                # Top-P
-                if top_p < 1.0:
-                    next_token_logits = top_p_filtering(next_token_logits, top_p)
-                # Sample
-                probs = F.softmax(next_token_logits, dim=-1)
-                next_token_id = torch.multinomial(probs, 1)
-            else:
-                # Greedy Decoding
-                next_token_logits = logits[:, -1]
-                next_token_logits = _apply_repetition_penalty(
-                    next_token_logits, seen_token_ids, repetition_penalty
-                )
-                next_token_logits = _no_repeat_ngram_mask(next_token_logits, X[0].tolist(), no_repeat_ngram_size)
-                next_token_id = next_token_logits.argmax(dim=-1, keepdim=True)
-
-            # 遇到 EOS 停止
-            if eos_token_id is not None and next_token_id.item() == eos_token_id:
-                break
-
-            seen_token_ids.add(next_token_id.item())
-
-            # 4. 将新 token 添加到序列
-            X = torch.cat((X, next_token_id), dim=-1)
-
-            # 生成后立即输出 token。缓存重建属于下一轮生成的准备工作，
-            # 不应该跳过当前 token 的 yield。
-            yield next_token_id.item()
-
-            # 5. Context Window 已经满了
-            # KV Cache 无法无限增长
-            # 当达到 context_length 后：
-            # 重新截取最近 context_length tokens 并重新建立 cache
-            if X.size(-1) > self.config.model.context_length:
-                X = X[:, -self.config.model.context_length:]
-                logits, past_kv = self.forward(X, use_cache=True, start_pos=0)
-                cache_len = self.config.model.context_length
-                continue
-            
-            # 6. KV Cache Decode
-            logits, past_kv = (
-                self.forward(
-                    next_token_id,
-                    past_kv=past_kv,
-                    use_cache=True,
-                    start_pos=cache_len
-                )
-            )
-            cache_len += 1
+    @torch.no_grad()
+    def streaming_generate(self, X: torch.Tensor, max_tokens=512, temperature=0.85,
+                           repetition_penalty=1.2, top_k=50, top_p=0.9,
+                           eos_token_id=2, do_sample=True, no_repeat_ngram_size=0,
+                           suppress_token_ids=(), allow_context_rollover=True):
+        yield from self._generate_tokens(
+            X, max_tokens=max_tokens, temperature=temperature,
+            repetition_penalty=repetition_penalty, top_k=top_k, top_p=top_p,
+            eos_token_id=eos_token_id, do_sample=do_sample,
+            no_repeat_ngram_size=no_repeat_ngram_size,
+            suppress_token_ids=suppress_token_ids,
+            allow_context_rollover=allow_context_rollover,
+        )
 
     def chat(self, message, tokenizer, history=None, **kwargs):
-        # Copy caller-owned history instead of mutating it in place.
-        messages = list(history or [])
-        messages.append({"role": "user", "content": message})
+        # 合并历史和当前问题
+        messages = list(history or []) + [{"role": "user", "content": message}]
+        # 用于裁剪
+        budget = kwargs.setdefault("max_tokens", self.config.model.context_length // 2)
+        messages = fit_chat_messages(
+            tokenizer, messages, self.config.model.context_length,
+            reserve_tokens=budget,
+        )
+        kwargs["allow_context_rollover"] = False
 
         # 以模型参数的实际设备为准；调用方可能已通过 model.to(...) 将模型移到
         # generation.device，不能继续使用训练阶段的 system.device。
