@@ -137,6 +137,10 @@ def train_dpo(config: SnailConfig, save_model_dir: str, run: wandb.Run, checkpoi
     accumulated_steps = 0
     has_pending_grads = False
     last_save_step = global_step
+    # 未配置时保留原有按 print_interval 保存的行为。
+    checkpoint_interval = config.training.checkpoint_interval
+    if checkpoint_interval is None:
+        checkpoint_interval = config.training.print_interval
 
     def apply_pending_gradients():
         """提交当前累积窗口；残余窗口会按实际 micro-batch 数重新归一化。"""
@@ -258,7 +262,7 @@ def train_dpo(config: SnailConfig, save_model_dir: str, run: wandb.Run, checkpoi
 
                 # 只在梯度累积边界保存 checkpoint: 半截梯度状态无法跨进程恢复,
                 # 强行 flush 会把 k/accum 份梯度当完整 step 消费并挤占 cosine 调度槽位
-                if not has_pending_grads and global_step - last_save_step >= config.training.print_interval:
+                if not has_pending_grads and global_step - last_save_step >= checkpoint_interval:
                     save_checkpoint(
                         policy_model, reference_model, optimizer, scaler,
                         global_step, epoch, epoch_step, optimizer_step, run,

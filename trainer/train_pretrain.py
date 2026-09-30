@@ -173,6 +173,9 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
     has_pending_grads = False
     accumulated_steps = 0
 
+    checkpoint_interval = config.training.checkpoint_interval
+    last_save_step = global_step
+
     val_min_loss = checkpoint.get('val_min_loss', np.inf) if checkpoint else np.inf
 
     def apply_pending_gradients():
@@ -308,6 +311,17 @@ def train_loop(config: SnailConfig, train_dataloader: DataLoader, val_dataloader
                                 "valid/loss": val_loss_mean,
                             }, step=global_step)    
                     model.train()
+
+                # 定期保存不强行提交半个累积窗口；到期后等待下一次更新。
+                if (checkpoint_interval is not None and not has_pending_grads
+                        and global_step - last_save_step >= checkpoint_interval):
+                    save_checkpoint(
+                        base_model, optimizer, scaler, global_step, epoch, epoch_step,
+                        optimizer_step, val_min_loss, run,
+                        os.path.join(save_model_dir, "checkpoint.pt"),
+                    )
+                    last_save_step = global_step
+                    console.print(f"[green]Checkpoint saved at global_step {global_step}")
 
             # Epoch end
             console.print(f"[green]Epoch [{epoch + 1}/{config.training.epochs}] completed")

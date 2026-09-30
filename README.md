@@ -261,3 +261,13 @@ python trainer/train_dpo.py \
 训练产物：`dpo_new.pt`。
 
 > SFT 与 DPO 的断点续训方式与预训练一致：通过 `config.json` 中的 `training.use_checkpoint` / `training.from_checkpoint` 恢复（checkpoint 内含双模型/优化器/GradScaler 及完整 RNG 状态）。
+
+### 定期保存训练断点
+
+三种训练器均支持 `training.checkpoint_interval`，单位为已完成的 micro-batch 数。
+达到间隔后，在下一个梯度累积完成的边界保存，不会为保存而提前更新模型。
+例如间隔为 3、梯度累积为 2 时，会在第 4、8、12 个 micro-batch 保存。
+预训练和 SFT 写入 `checkpoint.pt`，DPO 写入 `dpo_checkpoint.pt`，每次覆盖上一个定期断点。
+
+从断点恢复后，间隔从恢复的 `global_step` 重新计数。训练结束或中断时，仍会提交残余梯度并保存。
+`checkpoint_interval` 为 `null` 或未设置时保留旧行为：预训练/SFT 仅在退出时保存完整断点，DPO 沿用 `print_interval` 作为保存间隔；验证得到的最佳模型权重仍独立保存。

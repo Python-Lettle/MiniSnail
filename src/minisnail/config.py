@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Optional
 import json
-import warnings
 import torch
 
 @dataclass
@@ -45,7 +44,8 @@ class TrainingConfig:
     use_amp: bool = True
     # 阶段元数据；训练入口仍由 trainer 脚本决定。
     stage: str | None = None
-    # 配置兼容字段，当前训练循环尚未实现独立的定期 checkpoint。
+    # 按 micro-batch 计数，到期后延迟至梯度累积边界保存。
+    # None 保留旧行为：pretrain/SFT 仅退出时保存，DPO 使用 print_interval。
     checkpoint_interval: int | None = None
 
     def __post_init__(self):
@@ -168,17 +168,6 @@ class SnailConfig:
             generation=GenerationConfig(**config_dict.get("generation", {})),
             wandb=WandbConfig(**config_dict.get("wandb", {})),
         )
-        inactive_options = []
-        if config.training.checkpoint_interval is not None:
-            inactive_options.append("training.checkpoint_interval")
-        if inactive_options:
-            warnings.warn(
-                "以下配置已保留，但当前训练脚本尚未实现："
-                + ", ".join(inactive_options)
-                + "; 这些选项不会改变当前训练行为",
-                UserWarning,
-                stacklevel=2,
-            )
         return config
     
     @classmethod
